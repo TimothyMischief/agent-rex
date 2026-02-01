@@ -128,6 +128,32 @@ export const of = just
 
 #+end_src
 
+*** When to Use
+
+Use =just= when you need to lift a single value into the stream context, often for testing or as a starting point for composition.
+
+#+begin_src text :tangle no
+just(42):  42|
+           ^  ^
+           |  complete
+           emit value
+#+end_src
+
+#+begin_src javascript :tangle no
+// Provide a default value when a stream might be empty
+const withDefault = pipe(
+  potentiallyEmptyStream,
+  continueWith(() => just('default'))
+)
+
+// Start a chain of async operations
+const result = pipe(
+  just(userId),
+  chain(id => fetchUser(id)),
+  map(user => user.name)
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -154,6 +180,31 @@ export async function* fromPromise<T>(promise: Promise<T>): AsyncGenerator<T, vo
   yield value
 }
 
+#+end_src
+
+*** When to Use
+
+Use =fromPromise= to integrate Promise-based APIs into stream pipelines. The stream waits for the Promise to resolve, emits the value, then completes.
+
+#+begin_src text :tangle no
+fromPromise(fetch('/api/data')):
+
+  ---(waiting)---data|
+                 ^    ^
+                 |    complete
+                 resolved value
+#+end_src
+
+#+begin_src javascript :tangle no
+// Convert a fetch call to a stream
+const userData = fromPromise(fetch('/api/user').then(r => r.json()))
+
+// Use in a pipeline
+const notifications = pipe(
+  fromPromise(getNotifications()),
+  chain(notifications => from(notifications)),
+  filter(n => n.unread)
+)
 #+end_src
 
 *** Tests
@@ -196,6 +247,36 @@ export async function* from<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =from= to convert arrays, Sets, Maps, or any iterable into an async stream. This is your primary tool for lifting collections into the stream world.
+
+#+begin_src text :tangle no
+from([1, 2, 3]):  1-2-3|
+                  ^ ^ ^ ^
+                  | | | complete
+                  synchronous emissions
+#+end_src
+
+#+begin_src javascript :tangle no
+// Process array items through a pipeline
+const processed = pipe(
+  from([1, 2, 3, 4, 5]),
+  filter(x => x % 2 === 0),
+  map(x => x * 10)
+)
+// yields: 20, 40
+
+// Convert a Set to a stream
+const uniqueUsers = pipe(
+  from(new Set(userIds)),
+  chain(id => fetchUser(id))
+)
+
+// Process file lines
+const lines = from(fileContent.split('\n'))
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -230,6 +311,39 @@ export async function* periodic(intervalMs: number): AsyncGenerator<void, void, 
 
 #+end_src
 
+*** When to Use
+
+Use =periodic= to create a heartbeat or polling stream. Combine with =constant= to give it values, or use with =take= to limit iterations.
+
+#+begin_src text :tangle no
+periodic(100):  •---•---•---•---•---... (never ends)
+                ^   ^   ^   ^
+                |   100ms intervals
+                emits undefined
+#+end_src
+
+#+begin_src javascript :tangle no
+// Poll an API every 5 seconds
+const pollData = pipe(
+  periodic(5000),
+  chain(() => fromPromise(fetch('/api/status').then(r => r.json()))),
+  take(100)  // Stop after 100 polls
+)
+
+// Emit a timestamp every second
+const timestamps = pipe(
+  periodic(1000),
+  map(() => Date.now())
+)
+
+// Create a countdown timer
+const countdown = pipe(
+  periodic(1000),
+  scan((n) => n - 1, 10),
+  takeWhile(n => n >= 0)
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -256,6 +370,36 @@ export async function* empty(
 
 #+end_src
 
+*** When to Use
+
+Use =empty= when you need a stream that completes immediately without emitting values. Useful as a fallback or for conditional stream creation.
+
+#+begin_src text :tangle no
+empty():  |
+          ^
+          immediately complete
+#+end_src
+
+#+begin_src javascript :tangle no
+// Conditional stream based on feature flag
+const notifications = featureEnabled
+  ? fromEvent(eventSource, 'notification')
+  : empty()
+
+// Filter that might produce nothing
+const adminActions = pipe(
+  actions,
+  filter(a => a.requiresAdmin),
+  // If no admin actions, stream completes immediately
+)
+
+// Use as recovery fallback
+const safeStream = pipe(
+  riskyOperation,
+  recoverWith(() => empty())  // Silently complete on error
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -280,6 +424,28 @@ export async function* never(
   await new Promise(() => {})
 }
 
+#+end_src
+
+*** When to Use
+
+Use =never= as a placeholder stream that blocks indefinitely. Useful for testing timeouts or as a "keep-alive" in merge operations.
+
+#+begin_src text :tangle no
+never():  --------... (never emits, never completes)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Test timeout behavior
+const shouldTimeout = pipe(
+  merge(never(), fromPromise(timeoutAfter(1000))),
+  take(1)
+)
+
+// Keep a merge alive even if one stream completes
+const combined = merge(
+  eventStream,
+  never()  // Prevents merge from completing when eventStream ends
+)
 #+end_src
 
 *** Tests
@@ -320,6 +486,42 @@ export async function* iterate<T>(seed: T, fn: (value: T) => T): AsyncGenerator<
   }
 }
 
+#+end_src
+
+*** When to Use
+
+Use =iterate= to generate sequences where each value depends on the previous one. Always combine with limiting operators like =take= since it produces infinite streams.
+
+#+begin_src text :tangle no
+iterate(1, x => x * 2):
+
+  1-2-4-8-16-32-... (infinite)
+  ^ ^
+  | fn(1) = 2
+  seed
+#+end_src
+
+#+begin_src javascript :tangle no
+// Generate Fibonacci sequence
+const fibonacci = pipe(
+  iterate([0, 1], ([a, b]) => [b, a + b]),
+  map(([a]) => a),
+  take(10)
+)
+// yields: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34
+
+// Generate exponential backoff delays
+const backoffDelays = pipe(
+  iterate(100, d => Math.min(d * 2, 30000)),
+  take(10)
+)
+// yields: 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000
+
+// Walking through a linked list
+const walkList = pipe(
+  iterate(headNode, node => node.next),
+  takeWhile(node => node !== null)
+)
 #+end_src
 
 *** Tests
@@ -365,6 +567,50 @@ export async function* unfold<T, S>(
   }
 }
 
+#+end_src
+
+*** When to Use
+
+Use =unfold= when you need more control than =iterate= — specifically when the emitted value differs from the state, or when the sequence has a natural termination condition.
+
+#+begin_src text :tangle no
+unfold(1, n => ({ value: n, nextSeed: n+1, done: n > 3 })):
+
+  1-2-3|
+      ^
+      done: true stops iteration
+#+end_src
+
+#+begin_src javascript :tangle no
+// Paginated API fetching (state = page cursor, value = items)
+const allPages = unfold({ cursor: null, hasMore: true }, async ({ cursor }) => {
+  const response = await fetch(`/api/items?cursor=${cursor || ''}`)
+  const { items, nextCursor } = await response.json()
+  return {
+    value: items,
+    nextSeed: { cursor: nextCursor, hasMore: !!nextCursor },
+    done: !nextCursor
+  }
+})
+
+// Range of numbers
+const range = (start, end) => unfold(start, n => ({
+  value: n,
+  nextSeed: n + 1,
+  done: n >= end
+}))
+// range(1, 5) yields: 1, 2, 3, 4
+
+// Read lines from a buffer until empty
+const lines = unfold(buffer, buf => {
+  const newlineIdx = buf.indexOf('\n')
+  if (newlineIdx === -1) return { value: '', nextSeed: '', done: buf.length === 0 }
+  return {
+    value: buf.slice(0, newlineIdx),
+    nextSeed: buf.slice(newlineIdx + 1),
+    done: false
+  }
+})
 #+end_src
 
 *** Tests
@@ -420,6 +666,38 @@ export function startWith<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =startWith= to prepend an initial value to a stream. Common for providing defaults or initial state in reactive UIs.
+
+#+begin_src text :tangle no
+stream:              --1--2--3|
+startWith(0):      0---1--2--3|
+                   ^
+                   prepended value
+#+end_src
+
+#+begin_src javascript :tangle no
+// Provide initial state for a UI component
+const userState = pipe(
+  userUpdates,
+  startWith({ name: 'Loading...', avatar: null })
+)
+
+// Ensure a stream always has at least one value
+const withDefault = pipe(
+  searchResults,
+  startWith([])  // Start with empty array
+)
+
+// Initialize a scan with a starting emission
+const counter = pipe(
+  buttonClicks,
+  scan((count) => count + 1, 0),
+  startWith(0)  // Emit initial count before any clicks
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -451,6 +729,40 @@ export async function* concat<T>(
   for (const stream of streams) yield* stream
 }
 
+#+end_src
+
+*** When to Use
+
+Use =concat= to sequentially combine multiple streams. Each stream must complete before the next one starts — contrast with =merge= which interleaves concurrent streams.
+
+#+begin_src text :tangle no
+stream A:        1--2|
+stream B:             3--4|
+concat(A, B):    1--2--3--4|
+                     ^
+                     B starts after A completes
+#+end_src
+
+#+begin_src javascript :tangle no
+// Chain sequential operations
+const fullSequence = concat(
+  from(['Starting...']),
+  processItems(items),
+  from(['Done!'])
+)
+
+// Prioritized data sources (try cache, then network)
+const data = pipe(
+  concat(fromCache(key), fromNetwork(url)),
+  take(1)  // Take first available
+)
+
+// Build up a playlist
+const playlist = concat(
+  from(introSongs),
+  from(mainContent),
+  from(outroSongs)
+)
 #+end_src
 
 *** Tests
@@ -747,6 +1059,40 @@ export function map<T, U>(
 
 #+end_src
 
+*** When to Use
+
+Use =map= to transform each value in a stream. This is the workhorse operator for data transformation — extract fields, compute derived values, or convert types.
+
+#+begin_src text :tangle no
+stream:          --1---2---3--|
+map(x => x*10): --10--20--30-|
+                  ^   ^   ^
+                  transform each value
+#+end_src
+
+#+begin_src javascript :tangle no
+// Extract a field from objects
+const userNames = pipe(
+  userStream,
+  map(user => user.name)
+)
+
+// Async transformation (awaited automatically)
+const enrichedData = pipe(
+  ids,
+  map(async id => {
+    const details = await fetchDetails(id)
+    return { id, ...details }
+  })
+)
+
+// Parse incoming messages
+const parsedMessages = pipe(
+  rawMessages,
+  map(msg => JSON.parse(msg))
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -791,6 +1137,39 @@ export function constant<U>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =constant= to replace all stream values with a fixed value. Often combined with =periodic= to create a stream of repeated values, or used to signal events without caring about the event data.
+
+#+begin_src text :tangle no
+stream:            --a--b--c--|
+constant('x'):     --x--x--x--|
+                     ^  ^
+                     all values become 'x'
+#+end_src
+
+#+begin_src javascript :tangle no
+// Turn a timer into a constant signal
+const heartbeat = pipe(
+  periodic(1000),
+  constant('ping')
+)
+// yields: 'ping', 'ping', 'ping', ...
+
+// Count events (ignore event data, just count)
+const clickCount = pipe(
+  fromEvent(button, 'click'),
+  constant(1),
+  scan((count, one) => count + one, 0)
+)
+
+// Signal that "something happened" without details
+const refreshSignal = pipe(
+  merge(userAction, timerTick, networkReconnect),
+  constant('refresh')
+)
 #+end_src
 
 *** Tests
@@ -846,6 +1225,53 @@ export function scan<T, U>(
 
 #+end_src
 
+*** When to Use
+
+Use =scan= to accumulate state over time, emitting each intermediate result. Unlike =reduce= in arrays (which only returns the final value), =scan= emits after every input.
+
+#+begin_src text :tangle no
+stream:                  --1--2--3--|
+scan((a,x) => a+x, 0):  0--1--3--6--|
+                        ^  ^  ^  ^
+                        |  |  |  1+2+3
+                        |  |  1+2
+                        |  0+1
+                        seed
+#+end_src
+
+#+begin_src javascript :tangle no
+// Running total
+const runningTotal = pipe(
+  purchases,
+  map(p => p.amount),
+  scan((total, amount) => total + amount, 0)
+)
+
+// Collect items into an array
+const allItems = pipe(
+  itemStream,
+  scan((arr, item) => [...arr, item], [])
+)
+
+// Track min/max/average
+const stats = pipe(
+  measurements,
+  scan((stats, value) => ({
+    min: Math.min(stats.min, value),
+    max: Math.max(stats.max, value),
+    sum: stats.sum + value,
+    count: stats.count + 1,
+    avg: (stats.sum + value) / (stats.count + 1)
+  }), { min: Infinity, max: -Infinity, sum: 0, count: 0, avg: 0 })
+)
+
+// Undo/redo history
+const history = pipe(
+  actions,
+  scan((states, action) => [...states, applyAction(states.at(-1), action)], [initialState])
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -888,6 +1314,41 @@ export function tap<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =tap= for side effects that shouldn't block the stream: logging, analytics, non-critical updates. The side effect fires without waiting, so fast streams won't be slowed down by slow side effects.
+
+#+begin_src text :tangle no
+stream:          --1---2---3--|
+tap(console.log):-1---2---3--|
+                  ^
+                  side effect fires, value passes through unchanged
+#+end_src
+
+#+begin_src javascript :tangle no
+// Logging for debugging
+const debugged = pipe(
+  dataStream,
+  tap(x => console.log('Processing:', x)),
+  map(transform),
+  tap(x => console.log('Transformed:', x))
+)
+
+// Analytics tracking (fire-and-forget)
+const tracked = pipe(
+  userActions,
+  tap(action => analytics.track(action.type)),
+  filter(action => action.important)
+)
+
+// Update UI progressively (non-blocking)
+const withProgress = pipe(
+  largeDataset,
+  tap((_, i) => updateProgressBar(i)),
+  map(processItem)
+)
 #+end_src
 
 *** Tests
@@ -948,6 +1409,38 @@ export function awaitTap<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =awaitTap= when the side effect must complete before the value proceeds. This adds backpressure — the stream waits for each side effect to finish.
+
+#+begin_src text :tangle no
+stream:                --1------2------3--|
+awaitTap(save, 50ms): --1------2------3--|  (each value delayed by save time)
+                        ^ wait ^ wait ^
+#+end_src
+
+#+begin_src javascript :tangle no
+// Ensure each item is saved before processing next
+const savedItems = pipe(
+  itemStream,
+  awaitTap(item => database.save(item)),
+  map(item => ({ ...item, saved: true }))
+)
+
+// Rate-limited API calls (wait for each to complete)
+const apiResults = pipe(
+  requests,
+  awaitTap(req => rateLimiter.acquire()),
+  map(req => fetch(req.url))
+)
+
+// Sequential file writes (one at a time)
+const written = pipe(
+  files,
+  awaitTap(file => fs.writeFile(file.path, file.content))
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -996,6 +1489,37 @@ export function continueWith<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =continueWith= to append a lazily-created stream after the first completes. The continuation function is only called when needed, unlike =concat= which takes streams directly.
+
+#+begin_src text :tangle no
+stream:                    --1--2--|
+continueWith(() => B):     --1--2--3--4--|
+                                  ^
+                                  B() called here
+#+end_src
+
+#+begin_src javascript :tangle no
+// Provide fallback data when stream is empty
+const withFallback = pipe(
+  primarySource,
+  continueWith(() => from(fallbackData))
+)
+
+// Retry pattern: on failure, try alternative
+const resilient = pipe(
+  primaryApi,
+  recoverWith(() => continueWith(() => backupApi, empty()))
+)
+
+// Lazy infinite stream (only created if first stream ends)
+const extendable = pipe(
+  finiteData,
+  continueWith(() => generateMore())
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1033,6 +1557,40 @@ export async function* concatAll<T>(
 ): AsyncGenerator<T, void, void> {
   for await (const stream of streamOfStreams) yield* stream
 }
+#+end_src
+
+*** When to Use
+
+Use =concatAll= to flatten a stream of streams sequentially. Each inner stream must complete before the next one starts. Contrast with =mergeAll= which processes inner streams concurrently.
+
+#+begin_src text :tangle no
+outer:       --[A]----[B]-----|
+A:             1-2|
+B:                    3-4-5|
+concatAll:   --1-2----3-4-5--|
+                 ^
+                 B waits for A to complete
+#+end_src
+
+#+begin_src javascript :tangle no
+// Process file chunks in order
+const allChunks = pipe(
+  fileStreams,  // Stream of streams, one per file
+  concatAll     // Flatten while preserving order
+)
+
+// Sequential API pagination
+const allPages = pipe(
+  pageStreams,  // Each page is a stream of items
+  concatAll     // Items from page 1, then page 2, etc.
+)
+
+// Alternative to concatMap (manual version)
+const flattened = pipe(
+  items,
+  map(item => from(item.children)),
+  concatAll
+)
 #+end_src
 
 *** Tests
@@ -1080,6 +1638,52 @@ export function concatMap<T, U>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =concatMap= when each input needs to produce multiple outputs *in sequence*. The mapper function's stream must complete before the next input is processed. For concurrent processing, use =chain= / =flatMap= instead.
+
+#+begin_src text :tangle no
+stream:              --a--------b--------|
+f(a):                  1--2|
+f(b):                           3--4--5|
+concatMap(f):        --1--2-----3--4--5--|
+                          ^
+                          f(b) waits for f(a)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Expand each item into multiple (ordered)
+const expanded = pipe(
+  users,
+  concatMap(user => from(user.posts))
+)
+// All posts from user 1, then all from user 2, etc.
+
+// Sequential async operations per item
+const processed = pipe(
+  jobs,
+  concatMap(job => pipe(
+    from(job.steps),
+    awaitTap(step => executeStep(step))
+  ))
+)
+
+// Retry with exponential backoff (one attempt at a time)
+const withRetry = pipe(
+  requests,
+  concatMap(req => pipe(
+    iterate(100, d => d * 2),
+    take(5),
+    concatMap(delay => pipe(
+      fromPromise(fetch(req)),
+      recoverWith(() => pipe(just(null), delay(delay)))
+    )),
+    filter(r => r !== null),
+    take(1)
+  ))
+)
 #+end_src
 
 *** Tests
@@ -1135,6 +1739,45 @@ export function filter<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =filter= to keep only values that match a condition. Values that fail the predicate are dropped entirely — downstream never sees them.
+
+#+begin_src text :tangle no
+stream:               --1--2--3--4--5--|
+filter(x => x > 2):   -------3--4--5--|
+                         ^
+                         1 and 2 dropped
+#+end_src
+
+#+begin_src javascript :tangle no
+// Only process valid items
+const validItems = pipe(
+  allItems,
+  filter(item => item.isValid)
+)
+
+// Async predicate (e.g., permission check)
+const authorized = pipe(
+  requests,
+  filter(async req => await checkPermission(req.userId, req.resource))
+)
+
+// Type narrowing with filter
+const numbers = pipe(
+  mixedStream,
+  filter((x): x is number => typeof x === 'number')
+)
+
+// Chain filters for complex conditions
+const results = pipe(
+  events,
+  filter(e => e.type === 'click'),
+  filter(e => e.target.matches('.button')),
+  filter(e => !e.defaultPrevented)
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1169,6 +1812,40 @@ export async function* skipRepeats<T>(
   }
 }
 
+#+end_src
+
+*** When to Use
+
+Use =skipRepeats= to suppress consecutive duplicates. Only emits when the value changes from the previous one. Uses strict equality (~===~) for comparison.
+
+#+begin_src text :tangle no
+stream:       --1--1--2--2--3--1--1--|
+skipRepeats:  --1-----2-----3--1-----|
+                 ^     ^        ^
+                 consecutive 1s and 2s dropped,
+                 but new 1 at end emits
+#+end_src
+
+#+begin_src javascript :tangle no
+// UI: Only update when state actually changes
+const distinctStates = pipe(
+  stateStream,
+  skipRepeats
+)
+
+// Avoid redundant API calls
+const distinctQueries = pipe(
+  searchInput,
+  debounce(300),
+  skipRepeats  // Don't search if query unchanged
+)
+
+// Filter out repeated sensor readings
+const changedReadings = pipe(
+  sensorData,
+  map(d => d.value),
+  skipRepeats
+)
 #+end_src
 
 *** Tests
@@ -1228,6 +1905,37 @@ export function skipRepeatsWith<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =skipRepeatsWith= when you need custom equality logic for detecting duplicates. Useful for objects, where reference equality isn't meaningful.
+
+#+begin_src text :tangle no
+stream:                      --{a:1}--{a:1}--{a:2}--|
+skipRepeatsWith(byA):        --{a:1}--------{a:2}--|
+                                      ^
+                                      same .a value, dropped
+#+end_src
+
+#+begin_src javascript :tangle no
+// Compare objects by specific field
+const distinctUsers = pipe(
+  userUpdates,
+  skipRepeatsWith((a, b) => a.id === b.id && a.version === b.version)
+)
+
+// Deep equality check
+const distinctConfigs = pipe(
+  configStream,
+  skipRepeatsWith((a, b) => JSON.stringify(a) === JSON.stringify(b))
+)
+
+// Fuzzy equality (within tolerance)
+const significantChanges = pipe(
+  measurements,
+  skipRepeatsWith((a, b) => Math.abs(a - b) < 0.01)
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1285,6 +1993,44 @@ export function take<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =take= to limit the number of values from a stream. Essential for working with infinite streams or when you only need the first N results.
+
+#+begin_src text :tangle no
+stream:     --1--2--3--4--5--|
+take(3):    --1--2--3|         (completes early)
+                    ^
+                    stops after 3 values
+#+end_src
+
+#+begin_src javascript :tangle no
+// Get first 10 search results
+const topResults = pipe(
+  searchResults,
+  take(10)
+)
+
+// Limit infinite streams
+const sample = pipe(
+  periodic(100),
+  take(5)  // Only 5 ticks
+)
+
+// "First N or all if fewer" pattern
+const preview = pipe(
+  items,
+  take(3)  // At most 3 items for preview
+)
+
+// Take first match (like find but as stream)
+const firstMatch = pipe(
+  allItems,
+  filter(item => item.matches(criteria)),
+  take(1)
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1323,6 +2069,38 @@ export function skip<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =skip= to ignore the first N values from a stream. The stream still processes those values — it just doesn't emit them.
+
+#+begin_src text :tangle no
+stream:     --1--2--3--4--5--|
+skip(2):    -------3--4--5--|
+               ^
+               first 2 values dropped
+#+end_src
+
+#+begin_src javascript :tangle no
+// Skip header row in CSV data
+const dataRows = pipe(
+  csvRows,
+  skip(1)  // Skip header
+)
+
+// Pagination: skip to page N
+const page3 = pipe(
+  allItems,
+  skip(20),   // Skip pages 1-2 (10 items each)
+  take(10)    // Take page 3
+)
+
+// Ignore initial "loading" state
+const loadedStates = pipe(
+  stateStream,
+  skip(1)  // Skip initial empty/loading state
+)
 #+end_src
 
 *** Tests
@@ -1369,6 +2147,37 @@ export function slice<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =slice= to extract a range of values by index, like Array.slice(). Combines the functionality of =skip= and =take= in a single operator.
+
+#+begin_src text :tangle no
+stream:         --0--1--2--3--4--5--|
+slice(1, 4):    -----1--2--3|        
+                  ^        ^
+                  start    end (exclusive)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Get items 10-20 (pagination)
+const page2 = pipe(
+  allItems,
+  slice(10, 20)
+)
+
+// Skip first and last (equivalent to slice(1, -1) for known length)
+const middle = pipe(
+  items,
+  slice(1, items.length - 1)
+)
+
+// Extract specific range for processing
+const range = pipe(
+  dataPoints,
+  slice(100, 200)  // Points 100-199
+)
 #+end_src
 
 *** Tests
@@ -1422,6 +2231,38 @@ export function takeWhile<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =takeWhile= to take values as long as a condition holds, stopping at the first failure. The failing value is *not* emitted.
+
+#+begin_src text :tangle no
+stream:              --1--2--3--4--5--|
+takeWhile(x < 4):    --1--2--3|         (stops at 4)
+                              ^
+                              4 fails predicate, stream ends
+#+end_src
+
+#+begin_src javascript :tangle no
+// Read until end marker
+const untilEnd = pipe(
+  lines,
+  takeWhile(line => line !== 'END')
+)
+
+// Process while resources available
+const whileAvailable = pipe(
+  tasks,
+  takeWhile(() => memory.available > threshold)
+)
+
+// Countdown until zero
+const countdown = pipe(
+  iterate(10, n => n - 1),
+  takeWhile(n => n >= 0)
+)
+// yields: 10, 9, 8, ..., 1, 0
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1470,6 +2311,39 @@ export function skipWhile<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =skipWhile= to drop values as long as a condition holds, then emit everything after. Once the predicate fails, all subsequent values pass through (even if they would match the predicate).
+
+#+begin_src text :tangle no
+stream:              --1--2--3--4--2--1--|
+skipWhile(x < 3):    -------3--4--2--1--|
+                        ^
+                        first value where predicate fails,
+                        all values after are emitted
+#+end_src
+
+#+begin_src javascript :tangle no
+// Skip header comments in a file
+const codeLines = pipe(
+  fileLines,
+  skipWhile(line => line.startsWith('#'))
+)
+
+// Skip loading states, start from first real data
+const realData = pipe(
+  states,
+  skipWhile(state => state.loading)
+)
+
+// Skip until a specific marker
+const afterMarker = pipe(
+  events,
+  skipWhile(e => e.type !== 'START'),
+  skip(1)  // Also skip the START event itself
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1516,6 +2390,37 @@ export function takeUntil<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =takeUntil= to take values until a condition is met, then stop. The matching value is *not* emitted (exclusive). Contrast with =takeWhile= which stops when the condition *fails*.
+
+#+begin_src text :tangle no
+stream:               --1--2--3--4--5--|
+takeUntil(x === 3):   --1--2|            (stops before 3)
+                            ^
+                            3 matches, not emitted, stream ends
+#+end_src
+
+#+begin_src javascript :tangle no
+// Process until error marker
+const untilError = pipe(
+  messages,
+  takeUntil(msg => msg.type === 'ERROR')
+)
+
+// Read stream until timeout
+const withTimeout = pipe(
+  dataStream,
+  takeUntil(() => Date.now() > deadline)
+)
+
+// Process until user cancels
+const untilCancel = pipe(
+  workItems,
+  takeUntil(() => cancelled)
+)
 #+end_src
 
 *** Tests
@@ -1567,6 +2472,39 @@ export function delay<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =delay= to add a pause before each emission. Each value is held for the specified duration before being yielded downstream.
+
+#+begin_src text :tangle no
+time:         0ms    100ms   200ms    300ms
+stream:       --1-------2-------3--|
+delay(50):    ----1-------2-------3--|
+                  ^
+                  each value delayed by 50ms
+#+end_src
+
+#+begin_src javascript :tangle no
+// Simulate network latency in tests
+const slowResponse = pipe(
+  mockData,
+  delay(500)  // Simulate 500ms network delay
+)
+
+// Rate-limit outgoing messages
+const throttledMessages = pipe(
+  messages,
+  delay(100)  // At most 10 messages per second
+)
+
+// Stagger animations
+const staggered = pipe(
+  elements,
+  delay(50),
+  tap(el => el.classList.add('visible'))
+)
 #+end_src
 
 *** Tests
@@ -1805,6 +2743,53 @@ export function throttle<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =throttle= to limit how frequently values are emitted. Unlike =debounce= (which waits for quiet), =throttle= ensures regular updates during continuous activity.
+
+#+begin_src text :tangle no
+time:             0   100  200  300  400  500  600
+stream:           a-b-c-d-e-f-g-h-i-j-k-|
+                  ^ ^       ^       ^   ^
+                  rapid continuous emissions
+
+throttle(200):    a-------d-------g-----k|
+                  ^       ^       ^     ^
+                  leading trailing leading trailing
+                  (first) (last   (first (final)
+                          in       after
+                          window)  window)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Scroll position updates (max 10 per second)
+const scrollPosition = pipe(
+  fromEvent(window, 'scroll'),
+  map(() => window.scrollY),
+  throttle(100)  // At most every 100ms
+)
+
+// Mouse move tracking
+const mousePosition = pipe(
+  fromEvent(document, 'mousemove'),
+  map(e => ({ x: e.clientX, y: e.clientY })),
+  throttle(16)  // ~60fps
+)
+
+// Progress updates (don't spam UI)
+const progressUpdates = pipe(
+  rawProgress,
+  throttle(250, { leading: true, trailing: true })
+)
+
+// Rate-limited API polling
+const apiData = pipe(
+  trigger,
+  throttle(1000, { leading: true, trailing: false }),
+  chain(() => fetchData())
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1868,6 +2853,57 @@ export function recoverWith<T, E = unknown>(
 
 #+end_src
 
+*** When to Use
+
+Use =recoverWith= to gracefully handle errors by switching to an alternative stream. The error is passed to your recovery function, allowing error-specific handling.
+
+#+begin_src text :tangle no
+stream:               --1--2--X
+                             ^
+                             error thrown
+
+recoverWith(fallback): -1--2--a--b--|   
+                             ^
+                             switches to fallback stream
+#+end_src
+
+#+begin_src javascript :tangle no
+// Fallback to cached data on network error
+const data = pipe(
+  networkStream,
+  recoverWith(err => {
+    console.error('Network failed:', err)
+    return from(cachedData)
+  })
+)
+
+// Provide default value on parse error
+const parsed = pipe(
+  rawData,
+  map(JSON.parse),
+  recoverWith(() => just({ error: 'Invalid JSON' }))
+)
+
+// Log and continue empty on non-critical errors
+const resilient = pipe(
+  allItems,
+  recoverWith(err => {
+    logError(err)
+    return empty()
+  })
+)
+
+// Error-specific recovery
+const smart = pipe(
+  apiCall,
+  recoverWith(err => {
+    if (err.status === 404) return just(null)
+    if (err.status === 401) return fromPromise(refreshAndRetry())
+    throw err  // Re-throw unexpected errors
+  })
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -1916,6 +2952,39 @@ export async function* throwError<E = unknown>(
   throw error
 }
 
+#+end_src
+
+*** When to Use
+
+Use =throwError= to create a stream that immediately fails. Useful for testing error handling, conditional error injection, or signaling failures in stream compositions.
+
+#+begin_src text :tangle no
+throwError(new Error('fail')):  X
+                                ^
+                                immediately throws
+#+end_src
+
+#+begin_src javascript :tangle no
+// Validate input before processing
+const validated = input.isValid
+  ? from(input.data)
+  : throwError(new Error('Invalid input'))
+
+// Test error handling
+const mockFailingApi = throwError(new Error('Network timeout'))
+await expectStream(pipe(
+  mockFailingApi,
+  recoverWith(() => just('fallback'))
+)).toEmit(['fallback'])
+
+// Conditional failure in pipeline
+const checked = pipe(
+  items,
+  chain(item => item.required 
+    ? just(item) 
+    : throwError(new Error(`Missing required: ${item.name}`))
+  )
+)
 #+end_src
 
 *** Tests
@@ -1995,6 +3064,50 @@ export function retry<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =retry= when operations may fail transiently (network issues, rate limits, temporary unavailability). Provide a *factory function* that creates fresh streams for each attempt.
+
+#+begin_src text :tangle no
+streamFactory():    --1--X     (fails)
+retry(3):           --1--X     (attempt 1)
+                    --1--X     (attempt 2)
+                    --1--2--|  (attempt 3: success!)
+result:             --1--2--|
+#+end_src
+
+#+begin_src javascript :tangle no
+// Simple retry with max attempts
+const resilientFetch = retry(3, () => 
+  fromPromise(fetch('/api/data').then(r => r.json()))
+)
+
+// Retry with exponential backoff
+const withBackoff = retry({
+  maxAttempts: 5,
+  delayMs: 1000,  // Start with 1s delay
+  shouldRetry: (err, attempt) => {
+    console.log(`Attempt ${attempt} failed:`, err)
+    return true
+  }
+}, () => fetchLatestData())
+
+// Retry only specific errors
+const selectiveRetry = retry({
+  maxAttempts: 3,
+  shouldRetry: (err) => {
+    // Only retry network errors, not validation errors
+    return err.name === 'NetworkError' || err.status === 503
+  }
+}, () => apiCall())
+
+// Combine with recoverWith for fallback after all retries fail
+const withFallback = pipe(
+  retry(3, () => primaryApi()),
+  recoverWith(() => just(fallbackData))
+)
 #+end_src
 
 *** Tests
@@ -2189,6 +3302,50 @@ export async function* merge<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =merge= to combine multiple streams into one, emitting values from any source as they arrive. Order depends on timing, not input order. All sources run concurrently.
+
+#+begin_src text :tangle no
+stream A:      --1-----3-----5--|
+stream B:      ----2-----4-----|
+merge(A, B):   --1-2---3-4---5--|
+                 ^ ^   ^ ^
+                 interleaved by arrival time
+#+end_src
+
+#+begin_src javascript :tangle no
+// Combine multiple event sources
+const allClicks = merge(
+  fromEvent(button1, 'click'),
+  fromEvent(button2, 'click'),
+  fromEvent(button3, 'click')
+)
+
+// Poll multiple APIs simultaneously
+const allData = merge(
+  pollApi('/api/users'),
+  pollApi('/api/orders'),
+  pollApi('/api/inventory')
+)
+
+// First-wins pattern
+const fastest = pipe(
+  merge(
+    fromPromise(fetchFromCdn()),
+    fromPromise(fetchFromOrigin())
+  ),
+  take(1)
+)
+
+// Combine user actions with system events
+const allEvents = merge(
+  userActions,
+  systemNotifications,
+  timerTicks
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -2217,6 +3374,43 @@ export async function* mergeAll<T>(
   for await (const result of raceIteratorsWithOuter(outerIterator, s => s[Symbol.asyncIterator]()))
     if (result.type === 'inner') yield result.value
 }
+#+end_src
+
+*** When to Use
+
+Use =mergeAll= to flatten a stream of streams concurrently. Unlike =concatAll= (which waits for each inner to complete), =mergeAll= runs all inner streams simultaneously.
+
+#+begin_src text :tangle no
+outer:        --[A]-----[B]------|
+A:               1--2--3|
+B:                       4--5|
+mergeAll:     ---1--2--3-4--5---|
+                 ^       ^
+                 A and B values interleaved
+                 (A starts first, B joins while A active)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Fetch all URLs concurrently
+const allResponses = pipe(
+  from(urls),
+  map(url => fromPromise(fetch(url))),
+  mergeAll  // All fetches run in parallel
+)
+
+// Process queue items concurrently
+const results = pipe(
+  jobQueue,
+  map(job => processJob(job)),
+  mergeAll
+)
+
+// Flatten nested data with concurrency
+const allItems = pipe(
+  categories,
+  map(cat => from(cat.items)),
+  mergeAll
+)
 #+end_src
 
 *** Tests
@@ -2278,6 +3472,48 @@ export function chain<T, U>(
 
 export const flatMap = chain
 
+#+end_src
+
+*** When to Use
+
+Use =chain= (or its alias =flatMap=) when each input produces multiple async outputs that should all run concurrently.
+This is the go-to operator for =for each X, do Y and flatten results=.
+
+
+#+begin_src javascript :tangle no
+// Fetch related data for each user
+const userPosts = pipe(
+  userIds,
+  chain(id => fromPromise(fetchUserPosts(id)))
+)
+
+// Parallel file processing
+const allLines = pipe(
+  filePaths,
+  chain(path => readFileLines(path))
+)
+
+// Expand and process concurrently
+const processedItems = pipe(
+  categories,
+  chain(cat => pipe(
+    from(cat.items),
+    map(processItem)
+  ))
+)
+
+// Retry pattern using chain
+const withRetries = pipe(
+  requests,
+  chain(req => pipe(
+    from([1, 2, 3]),  // 3 attempts
+    concatMap(() => pipe(
+      fromPromise(tryRequest(req)),
+      recoverWith(() => empty())
+    )),
+    take(1)
+  ))
+)
 #+end_src
 
 *** Tests
@@ -2381,6 +3617,43 @@ export function switchMap<T, U>(
 
 #+end_src
 
+*** When to Use
+
+Use =switchMap= when only the latest request matters and previous in-flight operations should be abandoned. The classic example is search autocomplete.
+
+#+begin_src javascript :tangle no
+// Search autocomplete (cancel stale searches)
+const searchResults = pipe(
+  fromEvent(searchInput, 'input'),
+  debounce(300),
+  map(e => e.target.value),
+  switchMap(query => 
+    query.length < 2 
+      ? just([])
+      : fromPromise(searchApi(query))
+  )
+)
+
+// Tab content loading (cancel previous tab's fetch)
+const tabContent = pipe(
+  selectedTab,
+  switchMap(tabId => fromPromise(fetchTabContent(tabId)))
+)
+
+// Live data that should always be fresh
+const liveData = pipe(
+  refreshTrigger,
+  switchMap(() => fromPromise(fetchLatestData()))
+)
+
+// Form validation (cancel validation on new input)
+const validationResult = pipe(
+  formValue,
+  debounce(200),
+  switchMap(value => fromPromise(validateOnServer(value)))
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -2457,6 +3730,44 @@ export async function* latest<T extends readonly AsyncIterable<any>[]>(
 }
 #+end_src
 
+*** When to Use
+
+Use =latest= to combine multiple streams where you need the current value from each. Emits only after all streams have produced at least one value, then on every subsequent emission from any stream.
+
+#+begin_src text :tangle no
+stream A:      --1-----3---------5--|
+stream B:      ----a-------b--------|
+latest([A,B]): ----[1,a]-[3,a]-[3,b]-[5,b]|
+               ^^^^^^^^^^
+               waits for both, then emits on any change
+#+end_src
+
+#+begin_src javascript :tangle no
+// Combine width and height for calculations
+const dimensions = pipe(
+  latest([widthStream, heightStream]),
+  map(([w, h]) => ({ width: w, height: h, area: w * h }))
+)
+
+// React to changes in any of multiple inputs
+const formState = pipe(
+  latest([nameField, emailField, passwordField]),
+  map(([name, email, password]) => ({ name, email, password }))
+)
+
+// Price calculator with live updates
+const totalPrice = pipe(
+  latest([quantityStream, unitPriceStream, discountStream]),
+  map(([qty, price, discount]) => qty * price * (1 - discount))
+)
+
+// Synchronized state from multiple sources
+const dashboardState = pipe(
+  latest([userStream, settingsStream, dataStream]),
+  map(([user, settings, data]) => ({ user, settings, data }))
+)
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -2495,6 +3806,36 @@ export async function* applyLatest<T, U>(
   );
 }
 
+#+end_src
+
+*** When to Use
+
+Use =applyLatest= for applicative-style stream composition where you have a stream of functions and a stream of values. Each time either changes, apply the current function to the current value.
+
+#+begin_src text :tangle no
+functions:     f----g---------|
+values:        --1----2-------|
+applyLatest:   --f(1)-g(1)g(2)|
+#+end_src
+
+#+begin_src javascript :tangle no
+// Dynamic formatting based on locale
+const formattedPrices = applyLatest(
+  pipe(localeStream, map(locale => price => formatPrice(price, locale))),
+  priceStream
+)
+
+// Apply current validation rules to form value
+const validationResults = applyLatest(
+  validationRulesStream,  // Stream of validator functions
+  formValueStream
+)
+
+// Dynamic sorting
+const sortedItems = applyLatest(
+  pipe(sortConfigStream, map(config => items => sortItems(items, config))),
+  itemsStream
+)
 #+end_src
 
 *** Tests
@@ -2545,6 +3886,46 @@ export function untilStream<T, S = unknown>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =untilStream= to stop a stream when an external signal arrives. The source continues until the stop stream emits its first value.
+
+#+begin_src text :tangle no
+source:          --1--2--3--4--5--6--|
+stop:            -----------X--------|
+untilStream:     --1--2--3--|         
+                           ^
+                           stops when stop emits
+#+end_src
+
+#+begin_src javascript :tangle no
+// Stop polling when user logs out
+const data = pipe(
+  periodic(5000),
+  chain(() => fetchData()),
+  untilStream(logoutEvent)
+)
+
+// Process until cancel button clicked
+const processing = pipe(
+  workItems,
+  map(processItem),
+  untilStream(fromEvent(cancelButton, 'click'))
+)
+
+// Stop after timeout
+const withTimeout = pipe(
+  longRunningStream,
+  untilStream(fromPromise(sleep(30000)))
+)
+
+// Component lifecycle: stop when unmounted
+const subscription = pipe(
+  dataUpdates,
+  untilStream(componentDestroyed$)
+)
 #+end_src
 
 *** Tests
@@ -2599,6 +3980,44 @@ export function sinceStream<T, S = unknown>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =sinceStream= to gate a stream until an external signal arrives. Values before the signal are dropped.
+
+#+begin_src text :tangle no
+source:          --1--2--3--4--5--6--|
+start:           -------X------------|
+sinceStream:     ---------4--5--6---|  
+                    ^
+                    values before start are dropped
+#+end_src
+
+#+begin_src javascript :tangle no
+// Start processing after initialization
+const mainLoop = pipe(
+  events,
+  sinceStream(appInitialized)
+)
+
+// Wait for user permission before tracking
+const tracking = pipe(
+  userActions,
+  sinceStream(consentGiven)
+)
+
+// Ignore events until animation completes
+const afterAnimation = pipe(
+  clickEvents,
+  sinceStream(animationComplete)
+)
+
+// Begin recording after start signal
+const recording = pipe(
+  audioSamples,
+  sinceStream(fromEvent(startButton, 'click'))
+)
 #+end_src
 
 *** Tests
@@ -2656,6 +4075,40 @@ export function buffer<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =buffer= to batch items for bulk processing. Reduces number of operations when handling many small items.
+
+#+begin_src text :tangle no
+stream:       --1--2--3--4--5--|
+buffer(2):    -----[1,2]--[3,4]--[5]|
+                   ^       ^      ^
+                   batch   batch  partial
+#+end_src
+
+#+begin_src javascript :tangle no
+// Batch API writes
+const batchWrites = pipe(
+  dataStream,
+  buffer(100),  // Write in batches of 100
+  awaitTap(batch => db.insertMany(batch))
+)
+
+// Process chunks for display
+const tableRows = pipe(
+  allRecords,
+  buffer(50),  // Display 50 rows at a time
+  map(batch => renderRows(batch))
+)
+
+// Reduce network overhead
+const batchedEvents = pipe(
+  analytics,
+  buffer(10),
+  tap(batch => sendToServer(batch))
+)
 #+end_src
 
 *** Tests
@@ -2748,6 +4201,39 @@ export function bufferTime<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =bufferTime= when you want to batch items by time rather than count. Useful for rate-limiting or collecting events over a time window.
+
+#+begin_src text :tangle no
+time:           0   100  200  300  400
+stream:         -1-2--3--4-5---6------|\nbufferTime(200):[1,2,3]--[4,5,6]------|\n                ^        ^\n                window   window\n#+end_src
+
+#+begin_src javascript :tangle no
+// Batch analytics events every 5 seconds
+const analyticsBuffer = pipe(
+  userEvents,
+  bufferTime(5000),
+  filter(batch => batch.length > 0),
+  tap(batch => sendAnalytics(batch))
+)
+
+// Aggregate log entries
+const logBatches = pipe(
+  logStream,
+  bufferTime(1000),
+  map(logs => logs.join('\\n'))
+)
+
+// Rate-limited updates to UI
+const throttledUpdates = pipe(
+  rapidChanges,
+  bufferTime(100),
+  map(changes => changes.at(-1)),  // Take latest in window
+  filter(Boolean)
+)
 #+end_src
 
 *** Tests
@@ -2856,6 +4342,50 @@ export function window<T>(
   })();
 }
 
+#+end_src
+
+*** When to Use
+
+Use =window= when you need streaming access to batches (rather than waiting for the full batch like =buffer=). Each window is itself a stream that can be processed incrementally.
+
+#+begin_src text :tangle no
+stream:       --1--2--3--4--5--|
+window(2):    --[S1]----[S2]----[S3]|
+              S1: 1-2|
+              S2: 3-4|
+              S3: 5|
+#+end_src
+
+#+begin_src javascript :tangle no
+// Process large files in chunks without loading full chunk
+const chunkedProcessing = pipe(
+  largeFileStream,
+  window(1000),
+  concatMap(async windowStream => {
+    let sum = 0
+    for await (const line of windowStream) {
+      sum += parseLine(line).value
+    }
+    return sum
+  })
+)
+
+// Stream processing with per-window aggregation
+const windowAggregates = pipe(
+  dataPoints,
+  window(100),
+  chain(async window => {
+    const values = await collect(window)
+    return just({ avg: average(values), count: values.length })
+  })
+)
+
+// Different processing per window
+const windowed = pipe(
+  events,
+  window(50),
+  map(w => processWindow(w))
+)
 #+end_src
 
 *** Tests
@@ -3388,6 +4918,38 @@ export function replay<T>(
 
 #+end_src
 
+*** When to Use
+
+Use =replay= to share a single source among multiple consumers while buffering recent values. Late subscribers receive buffered values plus live updates.
+
+#+begin_src text :tangle no
+source:      --1--2--3--4--5--|
+
+[with replay(2)]:
+
+consumer 1:  --1--2--3--4--5--|  (starts at beginning)
+consumer 2:       [2,3]4--5--|   (joins at 3, gets buffer [2,3])
+consumer 3:            [4,5]|    (joins at end, gets buffer [4,5])
+#+end_src
+
+#+begin_src javascript :tangle no
+// Share expensive computation result
+const sharedData = replay(Infinity, pipe(
+  fromPromise(expensiveFetch()),
+  chain(data => from(data.items))
+))
+
+// Multiple components can consume
+const component1 = collect(sharedData)
+const component2 = collect(sharedData)  // Same data, no refetch
+
+// Cache recent values for late subscribers
+const priceUpdates = replay(1, livePrice$)  // Cache latest price
+
+// Event sourcing: replay history for new subscribers
+const eventLog = replay(1000, events)  // Keep last 1000 events
+#+end_src
+
 *** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -3441,6 +5003,35 @@ export function share<T>(source: AsyncIterable<T>): AsyncIterable<T> {
   return replay(0, source)
 }
 
+#+end_src
+
+*** When to Use
+
+Use =share= when multiple consumers should receive the same live stream but don't need historical values. Late subscribers only get values emitted after they subscribe.
+
+#+begin_src text :tangle no
+source:      --1--2--3--4--5--|\n
+[with share]:\n
+consumer 1:  --1--2--3--4--5--|  (starts at beginning)
+consumer 2:       ?--3--4--5--|   (joins at 3, misses 1,2)
+consumer 3:            ?--5--|    (joins at 5, misses 1-4)
+#+end_src
+
+#+begin_src javascript :tangle no
+// Share WebSocket connection among components
+const wsMessages = share(fromWebSocket(ws))
+
+// Multiple listeners get same live events
+for await (const msg of wsMessages) { handleMsg1(msg) }
+for await (const msg of wsMessages) { handleMsg2(msg) }  // Different messages!
+
+// Share mouse position stream
+const mousePosition = share(
+  fromEvent(document, 'mousemove')
+)
+
+// Use replay(1) instead if you need the current value for late subscribers
+const currentPosition = replay(1, mousePosition)
 #+end_src
 
 *** Tests
