@@ -1,0 +1,2656 @@
+#+TITLE: Agent-Rex, An Async Generator/Iterator Based FRP-Like Library for JavaScript
+#+AUTHOR: Timothy Hope
+
+* Introduction
+
+FRP in Javascript has a long history with libraries such as RxJS, Bacon.js, Most.js, Kefir.js and many others.
+These libraries often use the Observable pattern to represent streams of data that can be observed and reacted to over time.
+The ergonomic of these libraries can vary significantly, with some using method chaining and others using functional combinators.
+Agent-Rex takes a different approach by leveraging async generators, which are a native feature of JavaScript, to provide a more intuitive and flexible way to work with streams of data.
+(Most.js has a generator-based implementation, Agent-Rex just makes async generators first-class citizens.)
+
+For example, async generator functions allow you to use `for await...of` loops to consume streams of data in a straightforward manner.
+
+The library is designed to be lightweight and easy to use, while still providing powerful capabilities for composing and transforming streams of data.
+The entire library is implemented and documented in this literate programming document.
+
+** Why Streams?
+
+Consider a common UI pattern: debouncing user input while fetching autocomplete suggestions.
+
+*Imperative approach* (callbacks, state management, manual cleanup):
+
+#+begin_example javascript
+let timeoutId = null;
+let currentController = null;
+
+inputElement.addEventListener('input', (e) => {
+  // Cancel previous debounce
+  if (timeoutId) clearTimeout(timeoutId);
+  // Cancel in-flight request
+  if (currentController) currentController.abort();
+  
+  timeoutId = setTimeout(async () => {
+    currentController = new AbortController();
+    try {
+      const results = await fetch(`/api/search?q=${e.target.value}`, {
+        signal: currentController.signal
+      });
+      displayResults(await results.json());
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error(err);
+    }
+  }, 300);
+});
+
+// Don't forget cleanup on unmount!
+#+end_example
+
+*Stream-based approach* (declarative, composable, automatic resource management):
+
+#+begin_example javascript
+import { fromEvent, debounce, map, chain, take } from 'agent-rex';
+
+const suggestions = pipe(
+  fromEvent(inputElement, 'input'),
+  debounce(300),
+  map(e => e.target.value),
+  chain(query => fromFetch(`/api/search?q=${query}`)),
+);
+
+for await (const results of suggestions) {
+  displayResults(results);
+}
+#+end_example
+
+The stream-based approach:
+- *Declares intent* rather than managing state
+- *Composes naturally* — add =filter=, =take=, or error handling without restructuring
+- *Handles cleanup automatically* — breaking from the loop cancels pending operations
+- *Is testable* — streams can be mocked with predictable timing
+
+** Under the Hood of Async Generators
+
+You may be familiar with the syntactic sugarof async generators and have built or consumed them with functions like this:
+
+#+begin_example javascript
+async function* asyncGenerator() {
+  yield Promise.resolve(1);
+  yield await Promise.resolve(2);
+  yield 3;
+}
+const asyncGen = asyncGenerator();
+asyncGen.next().then((res) => console.log(res.value)); // 1
+asyncGen.next().then((res) => console.log(res.value)); // 2
+asyncGen.next().then((res) => console.log(res.value)); // 3
+#+end_example
+
+However, under the hood, async generators are built on top of Promises and iterators.
+When you call an async generator function, it returns an async iterator object that conforms to the async iteration protocol.
+
+#+begin_example typescript
+interface AsyncIterator<T> {
+  next(value?: any): Promise<IteratorResult<T>>;
+  return?(value?: any): Promise<IteratorResult<T>>;
+  throw?(e?: any): Promise<IteratorResult<T>>;
+}
+
+interface IteratorResult<T> {
+  done: boolean;
+  value: T;
+}
+#+end_example
+
+When a =for await...of= loop is used to consume an async generator, it repeatedly calls the =next()= method on the async iterator.
+Each call to =next()= returns a Promise that resolves to an =IteratorResult= object.
+The =value= property of this object contains the yielded value from the generator, and the =done= property indicates whether the generator has completed.
+This mechanism allows async generators to produce values asynchronously, making them well-suited for representing streams of data that may arrive over time.
+They are also lazy, meaning that values are only produced when requested, which can help with performance and resource management.
+
+* Creating a Stream
+
+** =just=
+The =just= function creates a stream that emits a single value and then completes.
+Has the alias =of=.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits a single value and then completes.
+ */
+export async function* just<T>(
+  value: T
+): AsyncGenerator<T, void, void> {
+  yield value
+}
+
+export const of = just
+
+#+end_src
+
+** =fromPromise=
+The =fromPromise= function creates a stream from a Promise.
+When the Promise resolves, the stream emits the resolved value and then completes.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream from a Promise.
+ * When the Promise resolves, the stream emits the resolved value and then completes.
+ */
+export async function* fromPromise<T>(promise: Promise<T>): AsyncGenerator<T, void, void> {
+  const value = await promise
+  yield value
+}
+
+#+end_src
+
+** =from=
+The =from= function creates a stream from an iterable or async iterable.
+It emits each value from the iterable in sequence.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream from an iterable or async iterable.
+ * It emits each value from the iterable in sequence.
+ */
+export async function* from<T>(
+    iterable: Iterable<T> | AsyncIterable<T>
+): AsyncGenerator<T, void, void> {
+  for await (const item of iterable) yield item
+}
+
+#+end_src
+
+** =periodic=
+The =periodic= function creates a stream that emits at regular intervals.
+To give it a value, combine it with =constant=.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits at regular intervals.
+ * To give it a value, combine it with `constant`.
+ */
+export async function* periodic(intervalMs: number): AsyncGenerator<void, void, void> {
+  while (true) {
+    yield;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+#+end_src
+
+** =empty=
+The =empty= function creates a stream that immediately completes without emitting any values.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that immediately completes without emitting any values.
+ */
+export async function* empty(
+): AsyncGenerator<never, void, void> {
+  return
+}
+
+#+end_src
+
+** =never=
+The =never= function creates a stream that never emits any values and never completes.
+
+#+begin_src typescript :tangle index.ts
+
+export async function* never(
+): AsyncGenerator<never, void, void> {
+  await new Promise(() => {})
+}
+
+#+end_src
+
+** =iterate=
+
+The =iterate= function creates a stream that emits an infinite sequence of values by repeatedly applying a function to a seed value.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits an infinite sequence of values by repeatedly applying a function to a seed value.
+ */
+export async function* iterate<T>(seed: T, fn: (value: T) => T): AsyncGenerator<T, void, void> {
+  let current = seed;
+  while (true) {
+    yield current
+    current = fn(current)
+  }
+}
+
+#+end_src
+
+** =unfold=
+
+Like iterate but the function returns a tuple of ={ value: T, nextSeed: S, done: boolean }=.
+The generator will emit =value= and use =nextSeed= for the next iteration.
+If =done= is true, the generator will complete.
+=value= is ignored when =done= is true.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits values by unfolding a seed value using a function.
+ * The function returns an object containing the next value, the next seed, and a done flag
+ * to indicate completion.
+ */
+export async function* unfold<T, S>(
+  seed: S,
+  fn: (seed: S) => { value: T; nextSeed: S; done: boolean }
+): AsyncGenerator<T, void, void> {
+  let currentSeed = seed;
+  while (true) {
+    const { value, nextSeed, done } = fn(currentSeed)
+    if (done) return
+    yield value
+    currentSeed = nextSeed;
+  }
+}
+
+#+end_src
+
+** =startWith=
+
+The =startWith= function prepends a value to the beginning of a stream.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Prepends a value to the beginning of a stream.
+ */
+export async function* startWith<T>(
+  value: T,
+  stream: AsyncIterable<T>
+): AsyncGenerator<T, void, void> {
+  yield value
+  yield* stream
+}
+
+#+end_src
+
+** =concat=
+
+The =concat= function concatenates multiple streams into a single stream.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Concatenates multiple streams into a single stream.
+ */
+export async function* concat<T>(
+  ...streams: AsyncIterable<T>[]
+): AsyncGenerator<T, void, void> {
+  for (const stream of streams) yield* stream
+}
+
+#+end_src
+
+* Composing with =pipe=
+
+All operators in Agent-Rex use a *data-last* signature: the stream is always the final argument.
+Additionally, all operators support *automatic currying* via function overloads — you can call them with or without the stream argument:
+
+#+begin_example javascript
+// Both forms work:
+map(x => x * 2, stream)      // Direct call with all arguments
+map(x => x * 2)(stream)      // Curried: returns a function awaiting the stream
+#+end_example
+
+This enables clean, point-free composition using a =pipe= function:
+
+#+begin_example javascript
+// With built-in currying, pipes read naturally:
+const result = pipe(
+  from([1, 2, 3, 4, 5]),
+  filter(x => x % 2 === 0),
+  map(x => x * 10),
+  take(2),
+);
+// result: async generator yielding 20, 40
+#+end_example
+
+The =pipe= function composes left-to-right.
+Using TypeScript 5.0+ recursive conditional types, we can achieve full type safety with an arbitrary number of functions:
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * A unary function type for pipe composition.
+ */
+type Fn = (arg: any) => any
+
+/**
+ * Recursively validates that each function's input matches the previous function's output.
+ * If a mismatch is found, the expected type is shown in the error position.
+ */
+type ValidatePipeline<Fns extends Fn[], In> =
+  Fns extends [infer First extends Fn, ...infer Rest extends Fn[]]
+    ? Parameters<First>[0] extends In
+      ? [First, ...ValidatePipeline<Rest, ReturnType<First>>]
+      : [(arg: In) => ReturnType<First>, ...Rest]
+    : []
+
+/**
+ * Computes the final return type by walking through the function chain.
+ */
+type PipeReturn<Fns extends Fn[], In> =
+  Fns extends [infer First extends Fn, ...infer Rest extends Fn[]]
+    ? PipeReturn<Rest, ReturnType<First>>
+    : In
+
+/**
+ * Composes functions left-to-right, passing the result of each to the next.
+ * The first argument is the initial value; subsequent arguments are unary functions.
+ * 
+ * Uses recursive conditional types for full type safety with any number of functions.
+ * Type errors will point to the exact function with the type mismatch.
+ * 
+ * @example
+ * const result = pipe(
+ *   from([1, 2, 3, 4, 5]),
+ *   filter(x => x % 2 === 0),
+ *   map(x => x * 10),
+ *   take(2),
+ * );
+ * // result: async generator yielding 20, 40
+ */
+export function pipe<A, Fns extends Fn[]>(
+  initial: A,
+  ...fns: Fns & ValidatePipeline<Fns, A>
+): PipeReturn<Fns, A> {
+  // "Type-safe shell, untyped core" pattern: the signature provides full type
+  // validation at call sites, while the implementation uses `unknown` because
+  // TypeScript can't track types through reduce with recursive conditional types.
+  // The cast is safe because ValidatePipeline guarantees type alignment.
+  return fns.reduce<unknown>((acc, fn) => fn(acc), initial) as PipeReturn<Fns, A>
+}
+
+#+end_src
+
+** Currying Implementation Pattern
+
+Each operator uses TypeScript function overloads to support both curried and uncurried calls.
+Here's the pattern (using =map= as an example):
+
+#+begin_example typescript
+// Overload 1: Curried (no stream) — returns a function
+export function map<T, U>(
+  fn: (value: T) => U
+): (stream: AsyncIterable<T>) => AsyncGenerator<U, void, void>;
+
+// Overload 2: Uncurried (with stream) — returns the generator directly  
+export function map<T, U>(
+  fn: (value: T) => U,
+  stream: AsyncIterable<T>
+): AsyncGenerator<U, void, void>;
+
+// Implementation: checks if stream is provided
+export function map<T, U>(
+  fn: (value: T) => U,
+  stream?: AsyncIterable<T>,
+) {
+  if (stream === undefined) return (s) => map(fn, s);  // Return curried
+  return (async function* () { /* ... */ })();         // Return generator
+}
+#+end_example
+
+* Transformations
+
+** =map=
+
+The =map= function transforms each value emitted by a stream using a provided function.
+Supports both curried and uncurried calling conventions.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Transforms each value emitted by a stream using a provided function.
+ */
+export function map<T, U>(
+  fn: (value: T) => U | Promise<U>
+): (stream: AsyncIterable<T>) => AsyncGenerator<U, void, void>;
+export function map<T, U>(
+  fn: (value: T) => U | Promise<U>,
+  stream: AsyncIterable<T>
+): AsyncGenerator<U, void, void>;
+export function map<T, U>(
+  fn: (value: T) => U | Promise<U>,
+  stream?: AsyncIterable<T>,
+): AsyncGenerator<U, void, void> | ((stream: AsyncIterable<T>) => AsyncGenerator<U, void, void>) {
+  if (stream === undefined) return (s: AsyncIterable<T>) => map(fn, s);
+  return (async function* () {
+    for await (const item of stream) yield await fn(item);
+  })();
+}
+
+#+end_src
+
+** =constant=
+
+The =constant= function creates a stream that emits a constant value for each item in the source stream.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits a constant value for each item in the source stream.
+ */
+export async function* constant<U>(
+  value: U,
+  stream: AsyncIterable<any>,
+): AsyncGenerator<U, void, void> {
+  for await (const _ of stream) yield value
+}
+
+#+end_src
+
+** =scan=
+
+The =scan= function accumulates values from a stream using a provided accumulator function and an initial seed value.
+Yields the seed first, then each accumulated value.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Accumulates values from a stream using a provided accumulator function and an initial seed value.
+ */
+export async function* scan<T, U>(
+  accumulator: (acc: U, value: T) => U | Promise<U>,
+  seed: U,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<U, void, void> {
+  let acc = seed
+  yield acc
+  for await (const item of stream) {
+    acc = await accumulator(acc, item)
+    yield acc
+  }
+}
+
+#+end_src
+
+** =tap=
+
+The =tap= function allows you to perform side effects for each value emitted by a stream without modifying the values themselves.
+The side effect is fired without awaiting, so it does not block the stream processing.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Performs side effects for each value emitted by a stream without modifying the values themselves.
+ * The side effect is fired without awaiting, so it does not block the stream processing.
+ */
+export async function* tap<T>(
+  sideEffectFn: (value: T) => void | Promise<void>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  for await (const item of stream) {
+    sideEffectFn(item)
+    yield item
+  }
+}
+
+#+end_src
+
+** =awaitTap=
+
+The =awaitTap= function is like =tap=, but awaits the side effect before yielding the value.
+Use this when the side effect must complete before processing continues.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Performs side effects for each value emitted by a stream, awaiting completion before yielding.
+ * Use this when the side effect must complete before processing continues.
+ */
+export async function* awaitTap<T>(
+  sideEffectFn: (value: T) => void | Promise<void>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  for await (const item of stream) {
+    await sideEffectFn(item)
+    yield item
+  }
+}
+
+#+end_src
+
+** =continueWith=
+
+The =continueWith= function allows you to continue a stream with another stream once the first one completes.
+The first argument =f=, must be a function that returns the continuation stream.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Continues a stream with another stream once the first one completes.
+ */
+export async function* continueWith<T>(
+  f: () => AsyncIterable<T>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  yield* stream
+  yield* f()
+}
+
+#+end_src
+
+** =concatAll=
+
+The =concatAll= function flattens a stream of streams by concatenating them into a single stream.
+
+#+begin_src typescript :tangle index.ts
+/**
+ * Flattens a stream of streams by concatenating them into a single stream.
+ */
+export async function* concatAll<T>(
+  streamOfStreams: AsyncIterable<AsyncIterable<T>>,
+): AsyncGenerator<T, void, void> {
+  for await (const stream of streamOfStreams) yield* stream
+}
+#+end_src
+
+** =concatMap=
+
+=concatMap= has one argument, a function that must return a stream.
+The first argument =f=, must take in the values of the source stream and return the next stream to concatenate.
+You can think of it as a combination of a =map= producing streams being run through =concatAll=.
+
+#+begin_src typescript :tangle index.ts
+
+export async function* concatMap<T, U>(
+  f: (value: T) => AsyncIterable<U>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<U, void, void> {
+  for await (const item of stream) yield* f(item)
+}
+
+#+end_src
+
+* Filtering
+
+** =filter=
+
+The =filter= function filters values emitted by a stream based on a provided predicate function.
+Supports both curried and uncurried calling conventions.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Filters values emitted by a stream based on a provided predicate function.
+ */
+export function filter<T>(
+  predicate: (value: T) => boolean | Promise<boolean>
+): (stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>;
+export function filter<T>(
+  predicate: (value: T) => boolean | Promise<boolean>,
+  stream: AsyncIterable<T>
+): AsyncGenerator<T, void, void>;
+export function filter<T>(
+  predicate: (value: T) => boolean | Promise<boolean>,
+  stream?: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> | ((stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>) {
+  if (stream === undefined) return (s: AsyncIterable<T>) => filter(predicate, s);
+  return (async function* () {
+    for await (const item of stream) if (await predicate(item)) yield item;
+  })();
+}
+
+#+end_src
+
+** =skipRepeats=
+
+The =skipRepeats= function filters out consecutive duplicate values from a stream.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Filters out consecutive duplicate values from a stream.
+ */
+export async function* skipRepeats<T>(
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  let first = true
+  let lastValue: T | undefined
+  for await (const item of stream) {
+    if (first || item !== lastValue) {
+      lastValue = item
+      yield item
+      first = false
+    }
+  }
+}
+
+#+end_src
+
+** =skipRepeatsWith=
+
+The =skipRepeatsWith= function filters out consecutive duplicate values from a stream based on a provided equality function.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Filters out consecutive duplicate values from a stream based on a provided equality function.
+ */
+export async function* skipRepeatsWith<T>(
+  equals: (a: T, b: T) => boolean | Promise<boolean>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  let first = true
+  let lastValue: T | undefined
+  for await (const item of stream) {
+    if (first || !(await equals(item, lastValue as T))) {
+      lastValue = item
+      yield item
+      first = false
+    }
+  }
+}
+
+#+end_src
+
+* Slicing
+
+** =take=
+
+The =take= function creates a stream that emits only the first =n= values from the source stream.
+Supports both curried and uncurried calling conventions.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits only the first `n` values from the source stream.
+ */
+export function take<T>(
+  n: number
+): (stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>;
+export function take<T>(
+  n: number,
+  stream: AsyncIterable<T>
+): AsyncGenerator<T, void, void>;
+export function take<T>(
+  n: number,
+  stream?: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> | ((stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>) {
+  if (stream === undefined) return (s: AsyncIterable<T>) => take(n, s);
+  return (async function* () {
+    let count = 0;
+    for await (const item of stream) {
+      if (count++ < n) yield item;
+      else break;
+    }
+  })();
+}
+
+#+end_src
+
+** =skip=
+
+The =skip= function creates a stream that skips the first =n= values from the source stream and emits the rest.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that skips the first `n` values from the source stream and emits the rest.
+ */
+export async function* skip<T>(
+    n: number,
+    stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+    let count = 0
+    for await (const item of stream) if (count++ >= n) yield item
+}
+
+#+end_src
+
+** =slice=
+
+The =slice= function creates a stream that emits values from the source stream starting from index =start= up to, but not including, index =end=.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits values from the source stream starting from index `start` up to, but not including, index `end`.
+ */
+export async function* slice<T>(
+  start: number,
+  end: number,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  let index = 0
+  for await (const item of stream) {
+    if (index >= start && index < end) yield item
+    if (index++ >= end) break
+  }
+}
+
+#+end_src
+
+** =takeWhile=
+
+The =takeWhile= function creates a stream that emits values from the source stream as long as the provided predicate function returns true and ends the stream as soon as it returns false.
+
+#+begin_src typescript :tangle index.ts
+/**
+ * Creates a stream that emits values from the source stream as long as the provided predicate function returns true.
+ */
+export async function* takeWhile<T>(
+  predicate: (value: T) => boolean | Promise<boolean>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  for await (const item of stream) {
+    if (await predicate(item)) yield item
+    else break
+  }
+}
+
+#+end_src
+
+** =skipWhile=
+
+The =skipWhile= function creates a stream that skips values from the source stream as long as the provided predicate function returns true and starts emitting values as soon as it returns false.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that skips values from the source stream while the provided predicate function returns true, then emits the rest of the stream.
+ */
+export async function* skipWhile<T>(
+    predicate: (value: T) => boolean | Promise<boolean>,
+    stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+    let match = false
+    for await (const item of stream) {
+        if (!match && !(await predicate(item))) match = true
+        if (match) yield item
+    }
+}
+
+#+end_src
+
+** =takeUntil=
+
+The =takeUntil= function creates a stream that emits values from the source stream until the provided predicate function returns true, at which point it completes (the matching value is *not* emitted).
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits values from the source stream until the provided predicate function returns true.
+ * The matching value is not emitted.
+ */
+export async function* takeUntil<T>(
+  predicate: (value: T) => boolean | Promise<boolean>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  for await (const item of stream) {
+    if (await predicate(item)) break
+    yield item
+  }
+}
+
+#+end_src
+
+* Error Handling
+
+** =recoverWith= 
+
+The =recoverWith= function allows you to recover from errors in a stream by providing a function that returns an alternative stream when an error occurs.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Recovers from errors in a stream by providing an alternative stream.
+ */
+export async function* recoverWith<T, E = unknown>(
+  recoverFn: (error: E) => AsyncIterable<T>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  try { yield* stream }
+  catch (error) { yield* recoverFn(error as E) }
+}
+
+#+end_src
+
+** =throwError=
+
+The =throwError= function creates a stream that immediately throws an error when consumed.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that immediately throws an error when consumed.
+ */
+export async function* throwError<E = unknown>(
+    error: E
+): AsyncGenerator<never, void, void> {
+  throw error
+}
+
+#+end_src
+
+* Concurrent Operations
+
+This section covers operations that work with multiple streams concurrently.
+These require internal helpers that use =Promise.race= to handle multiple async iterators simultaneously.
+
+** Concurrency Helpers
+
+The key insight is that while =for await...of= is sequential, we can race multiple =.next()= calls concurrently:
+
+#+begin_example
+Sequential (for await):       Concurrent (Promise.race):
+                              
+  iter.next()                   Promise.race([
+      │                           iterA.next(),
+      ▼                           iterB.next(),
+  iter.next()                     iterC.next()
+      │                         ])
+      ▼                             │
+  iter.next()                       ▼
+      │                         Winner emits first
+      ▼
+  ...waits for each             Re-queue winner, race again
+#+end_example
+
+*** =raceIterators=
+
+The =raceIterators= function races multiple async iterators, yielding values tagged with their source index as they arrive.
+This is the core building block for merge, latest, and other concurrent operations.
+
+**** Algorithm
+
+1. *Initialize*: For each iterator, call =.next()= and store the pending promise in a Map keyed by index
+2. *Race*: Use =Promise.race= to await whichever promise resolves first
+3. *Handle result*:
+   - If =done=: Remove that iterator from the pending map
+   - If value: Yield ={index, value}=, then re-queue a new =.next()= promise for that iterator
+4. *Repeat* until all iterators are exhausted (pending map is empty)
+
+#+begin_src typescript :tangle index.ts
+
+type TaggedResult<T> = { index: number; value: T }
+
+/**
+ * Races multiple async iterators, yielding values tagged with their source index.
+ * Values are emitted as soon as any iterator produces one.
+ */
+async function* raceIterators<T>(
+  iterators: AsyncIterator<T>[]
+): AsyncGenerator<TaggedResult<T>, void, void> {
+  const pending = new Map<number, Promise<{ index: number; result: IteratorResult<T> }>>()
+
+  // Start all iterators
+  for (let i = 0; i < iterators.length; i++)
+    pending.set(i, iterators[i].next().then(result => ({ index: i, result })))
+
+  while (pending.size > 0) {
+    const { index, result } = await Promise.race(pending.values())
+
+    if (result.done) pending.delete(index)
+    else {
+      yield { index, value: result.value }
+      pending.set(index, iterators[index].next().then(result => ({ index, result })))
+    }
+  }
+}
+
+#+end_src
+
+*** =raceIteratorsWithOuter=
+
+The =raceIteratorsWithOuter= function extends =raceIterators= to also race against an outer stream that can add new iterators dynamically.
+This is used for =mergeAll= and =chain= where inner streams are created as the outer stream emits.
+
+#+begin_src typescript :tangle index.ts
+
+type RaceResult<T, O> =
+  | { type: 'inner'; index: number; value: T }
+  | { type: 'outer'; value: O }
+  | { type: 'outerDone' }
+
+/**
+ * Races inner iterators against an outer stream that produces new iterables.
+ * Useful for mergeAll/chain where we need to race existing inner streams
+ * while also listening for new streams from the outer source.
+ */
+async function* raceIteratorsWithOuter<T, O>(
+  outerIterator: AsyncIterator<O>,
+  getInnerIterator: (value: O) => AsyncIterator<T>
+): AsyncGenerator<RaceResult<T, O>, void, void> {
+  const innerIterators: AsyncIterator<T>[] = []
+  const pending = new Map<number | 'outer', Promise<{ key: number | 'outer'; result: IteratorResult<any> }>>()
+
+  // Start listening to outer
+  pending.set('outer', outerIterator.next().then(result => ({ key: 'outer' as const, result })))
+
+  while (pending.size > 0) {
+    const { key, result } = await Promise.race(pending.values())
+
+    if (key === 'outer') {
+      if (result.done) {
+        pending.delete('outer')
+        yield { type: 'outerDone' }
+      } else {
+        yield { type: 'outer', value: result.value }
+        // Add new inner iterator
+        const innerIndex = innerIterators.length
+        const innerIterator = getInnerIterator(result.value)
+        innerIterators.push(innerIterator)
+        pending.set(innerIndex, innerIterator.next().then(result => ({ key: innerIndex, result })))
+        // Continue listening to outer
+        pending.set('outer', outerIterator.next().then(result => ({ key: 'outer' as const, result })))
+      }
+    } else {
+      // Inner iterator result
+      const index = key as number
+      if (result.done) pending.delete(index)
+      else {
+        yield { type: 'inner', index, value: result.value }
+        pending.set(index, innerIterators[index].next().then(result => ({ key: index, result })))
+      }
+    }
+  }
+}
+
+#+end_src
+
+** =merge=
+
+The =merge= function merges multiple streams into a single stream, emitting values from any stream as they arrive.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Merges multiple streams into a single stream, emitting values as they arrive.
+ */
+export async function* merge<T>(
+  ...streams: AsyncIterable<T>[]
+): AsyncGenerator<T, void, void> {
+  const iterators = streams.map(s => s[Symbol.asyncIterator]())
+  for await (const { value } of raceIterators(iterators)) yield value
+}
+
+#+end_src
+
+** =mergeAll=
+
+The =mergeAll= function flattens a stream of streams by merging them into a single stream.
+
+#+begin_src typescript :tangle index.ts
+/**
+ * Flattens a stream of streams by merging them into a single stream.
+ */
+export async function* mergeAll<T>(
+  streamOfStreams: AsyncIterable<AsyncIterable<T>>,
+): AsyncGenerator<T, void, void> {
+  const outerIterator = streamOfStreams[Symbol.asyncIterator]()
+  for await (const result of raceIteratorsWithOuter(outerIterator, s => s[Symbol.asyncIterator]()))
+    if (result.type === 'inner') yield result.value
+}
+#+end_src
+
+** =chain= / =flatMap=
+
+The =chain= function (also exported as =flatMap=) maps each value from the source stream to a new stream and flattens the resulting streams into a single stream.
+You can think of it as a combination of a =map= producing streams being run through =mergeAll=.
+
+Note, that it doesn't concatenate the inner streams, but interleaves them as values become available.
+
+#+begin_example
+stream:            -a----b----c|
+f(a):               1--2--3|
+f(b):                    1----2----3|
+f(c):                           1-2-3|
+stream.chain(f):   -1--2-13---2-1-233|
+#+end_example
+
+#+begin_src typescript :tangle index.ts
+/**
+ * Maps each value from the source stream to a new stream and flattens the resulting streams into a single stream.
+ */
+export async function* chain<T, U>(
+  fn: (value: T) => AsyncIterable<U>,
+  stream: AsyncIterable<T>,
+): AsyncGenerator<U, void, void> {
+  const outerIterator = stream[Symbol.asyncIterator]()
+  for await (const result of raceIteratorsWithOuter(outerIterator, v => fn(v)[Symbol.asyncIterator]())) {
+    if (result.type === 'inner') yield result.value
+  }
+}
+
+export const flatMap = chain
+
+#+end_src
+
+** =latest=
+
+The =latest= function combines multiple streams into a single stream that emits a tuple of the latest values from each input stream whenever any of them emit a new value.
+
+We use a mapped tuple type to preserve the individual types of each stream in the output tuple.
+
+#+begin_src typescript :tangle index.ts
+/**
+ * Extracts the element type from an AsyncIterable.
+ */
+type AsyncIterableValue<T> = T extends AsyncIterable<infer U> ? U : never
+
+/**
+ * Maps a tuple of AsyncIterables to a tuple of their element types.
+ */
+type LatestValues<T extends readonly AsyncIterable<any>[]> = {
+  [K in keyof T]: AsyncIterableValue<T[K]>
+}
+
+/**
+ * Combines multiple streams into a single stream that emits a tuple of the latest values
+ * from each input stream whenever any of them emit a new value.
+ * 
+ * Type-safe: preserves individual stream types in the output tuple.
+ */
+export async function* latest<T extends readonly AsyncIterable<any>[]>(
+  streams: [...T],
+): AsyncGenerator<LatestValues<T>, void, void> {
+  const iterators = streams.map(s => s[Symbol.asyncIterator]())
+  const latestValues: any[] = new Array(streams.length)
+  const hasValue: boolean[] = new Array(streams.length).fill(false)
+  let hasAllValues = false
+
+  for await (const { index, value } of raceIterators(iterators)) {
+    latestValues[index] = value
+    hasValue[index] = true
+    if (!hasAllValues) hasAllValues = hasValue.every(Boolean)
+    if (hasAllValues) yield [...latestValues] as LatestValues<T>
+  }
+}
+#+end_src
+
+** =applyLatest=
+
+The =applyLatest= function applies the latest function from a stream of functions to the latest value from a stream of values.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Applies the latest function from a stream of functions to the latest value from a stream of values.
+ */
+export async function* applyLatest<T, U>(
+  fnStream: AsyncIterable<(value: T) => U>,
+  valueStream: AsyncIterable<T>,
+): AsyncGenerator<U, void, void> {
+  yield* map(
+    ([fn, value]) => fn(value),
+    latest([fnStream, valueStream]),
+  );
+}
+
+#+end_src
+
+** =untilStream=
+
+The =untilStream= function creates a stream that emits values from the source stream until another stream emits a value, at which point it stops emitting values.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that emits values from the source stream until another stream emits a value.
+ */
+export async function* untilStream<T, S = unknown>(
+  stopStream: AsyncIterable<S>,
+  sourceStream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  const sourceIterator = sourceStream[Symbol.asyncIterator]()
+  const stopIterator = stopStream[Symbol.asyncIterator]()
+  const iterators: AsyncIterator<T | S>[] = [sourceIterator, stopIterator]
+
+  for await (const { index, value } of raceIterators(iterators)) {
+    if (index === 1) break // stopStream emitted
+    yield value as T
+  }
+}
+
+#+end_src
+
+** =sinceStream=
+
+The =sinceStream= function creates a stream that starts emitting values from the source stream only after another stream emits a value.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a stream that starts emitting values from the source stream only after another stream emits a value.
+ */
+export async function* sinceStream<T, S = unknown>(
+  startStream: AsyncIterable<S>,
+  sourceStream: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> {
+  const sourceIterator = sourceStream[Symbol.asyncIterator]()
+  const startIterator = startStream[Symbol.asyncIterator]()
+  const iterators: AsyncIterator<T | S>[] = [sourceIterator, startIterator]
+  let started = false
+
+  for await (const { index, value } of raceIterators(iterators)) {
+    if (index === 1) {
+      started = true
+      continue
+    }
+    if (started) yield value as T
+  }
+}
+
+#+end_src
+
+* Multicasting
+
+By default, async generators are single-consumer: each consumer pulls values independently.
+These operators enable multiple consumers to share a single source stream.
+
+** =ReplaySubject=
+
+A =ReplaySubject= is a multicasting primitive that:
+1. Buffers up to N most recent values
+2. Allows multiple consumers to subscribe
+3. Replays buffered values to new subscribers
+4. Forwards live values to all active subscribers
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * A multicasting subject that replays buffered values to new subscribers.
+ * 
+ * @example
+ * const subject = new ReplaySubject<number>(2)  // buffer last 2 values
+ * 
+ * // Push values
+ * subject.next(1)
+ * subject.next(2)
+ * subject.next(3)
+ * 
+ * // New subscriber gets [2, 3] immediately, then live values
+ * for await (const value of subject) { ... }
+ */
+export class ReplaySubject<T> implements AsyncIterable<T> {
+  private buffer: T[] = []
+  private subscribers: Set<{
+    queue: T[]
+    resolve: ((result: IteratorResult<T>) => void) | null
+  }> = new Set()
+  private completed = false
+  private error: Error | null = null
+
+  constructor(private bufferSize: number = Infinity) {}
+
+  /**
+   * Push a value to all subscribers.
+   */
+  next(value: T): void {
+    if (this.completed) throw new Error('Cannot push to completed ReplaySubject')
+    
+    // Add to buffer
+    this.buffer.push(value)
+    if (this.buffer.length > this.bufferSize) {
+      this.buffer.shift()
+    }
+
+    // Notify all subscribers
+    for (const sub of this.subscribers) {
+      if (sub.resolve) {
+        const resolve = sub.resolve
+        sub.resolve = null
+        resolve({ value, done: false })
+      } else {
+        sub.queue.push(value)
+      }
+    }
+  }
+
+  /**
+   * Signal completion to all subscribers.
+   */
+  complete(): void {
+    this.completed = true
+    for (const sub of this.subscribers) {
+      if (sub.resolve) {
+        const resolve = sub.resolve
+        sub.resolve = null
+        resolve({ value: undefined as T, done: true })
+      }
+    }
+  }
+
+  /**
+   * Signal an error to all subscribers.
+   */
+  throw(error: Error): void {
+    this.error = error
+    this.completed = true
+    // Subscribers will see the error on next pull
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    const sub = {
+      queue: [...this.buffer],  // Start with buffered values
+      resolve: null as ((result: IteratorResult<T>) => void) | null
+    }
+    this.subscribers.add(sub)
+
+    return {
+      next: async (): Promise<IteratorResult<T>> => {
+        // Check for error
+        if (this.error) throw this.error
+        
+        // Return queued value if available
+        if (sub.queue.length > 0) {
+          return { value: sub.queue.shift()!, done: false }
+        }
+        
+        // Check if completed
+        if (this.completed) {
+          this.subscribers.delete(sub)
+          return { value: undefined as T, done: true }
+        }
+
+        // Wait for next value
+        return new Promise(resolve => {
+          sub.resolve = resolve
+        })
+      },
+      return: async (): Promise<IteratorResult<T>> => {
+        this.subscribers.delete(sub)
+        return { value: undefined as T, done: true }
+      }
+    }
+  }
+
+  /**
+   * Get the current buffer contents (snapshot).
+   */
+  getBuffer(): readonly T[] {
+    return [...this.buffer]
+  }
+
+  /**
+   * Number of active subscribers.
+   */
+  get subscriberCount(): number {
+    return this.subscribers.size
+  }
+}
+
+#+end_src
+
+** =replay=
+
+The =replay= function wraps a source stream to allow multiple consumers.
+Each consumer receives buffered values plus all subsequent values.
+
+The source stream is consumed lazily on first subscription.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Makes a stream consumable by multiple consumers by buffering values.
+ * 
+ * @param bufferSize - Maximum number of values to buffer for replay (default: Infinity)
+ * @param source - The source stream to multicast
+ * @returns An AsyncIterable that can be consumed by multiple consumers
+ * 
+ * @example
+ * const shared = replay(2, sourceStream)
+ * 
+ * // Consumer 1 starts
+ * const consumer1 = collect(shared)
+ * 
+ * // Consumer 2 joins later, gets last 2 values + live values
+ * const consumer2 = collect(shared)
+ */
+export function replay<T>(
+  bufferSize: number,
+  source: AsyncIterable<T>,
+): AsyncIterable<T> {
+  const subject = new ReplaySubject<T>(bufferSize)
+  let started = false
+
+  const startSource = () => {
+    if (started) return
+    started = true
+    
+    ;(async () => {
+      try {
+        for await (const value of source) {
+          subject.next(value)
+        }
+        subject.complete()
+      } catch (e) {
+        subject.throw(e as Error)
+      }
+    })()
+  }
+
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<T> {
+      startSource()
+      return subject[Symbol.asyncIterator]()
+    }
+  }
+}
+
+#+end_src
+
+** =share=
+
+The =share= function is like =replay= with a buffer size of 0.
+New subscribers only receive values emitted after they subscribe.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Shares a stream among multiple consumers without buffering.
+ * New subscribers only receive values emitted after subscription.
+ * 
+ * @example
+ * const shared = share(sourceStream)
+ * const consumer1 = shared[Symbol.asyncIterator]()
+ * // ... later ...
+ * const consumer2 = shared[Symbol.asyncIterator]()
+ * // consumer2 misses values emitted before subscription
+ */
+export function share<T>(source: AsyncIterable<T>): AsyncIterable<T> {
+  return replay(0, source)
+}
+
+#+end_src
+
+** =replayFactory= and =replayStream=
+
+The =replayFactory= function returns a factory that produces independent stream copies.
+Each emitted stream is a complete replay of the source from the beginning.
+
+This is useful when you need to provide fresh copies of a stream to different parts of your application.
+
+#+begin_src typescript :tangle index.ts
+
+/**
+ * Creates a factory that produces independent copies of a buffered stream.
+ * 
+ * @param bufferSize - Maximum values to buffer
+ * @param source - The source stream
+ * @returns A function that creates new stream copies
+ * 
+ * @example
+ * const factory = replayFactory(Infinity, sourceStream)
+ * 
+ * const copy1 = factory()  // Gets all values from beginning
+ * const copy2 = factory()  // Also gets all values from beginning
+ */
+export function replayFactory<T>(
+  bufferSize: number,
+  source: AsyncIterable<T>,
+): () => AsyncIterable<T> {
+  const subject = new ReplaySubject<T>(bufferSize)
+  let started = false
+
+  const startSource = () => {
+    if (started) return
+    started = true
+    
+    ;(async () => {
+      try {
+        for await (const value of source) {
+          subject.next(value)
+        }
+        subject.complete()
+      } catch (e) {
+        subject.throw(e as Error)
+      }
+    })()
+  }
+
+  return () => {
+    startSource()
+    return {
+      [Symbol.asyncIterator]: () => subject[Symbol.asyncIterator]()
+    }
+  }
+}
+
+/**
+ * Returns a stream that emits independent copies of the source stream.
+ * Each pull creates a new subscriber that receives buffered + live values.
+ * 
+ * @example
+ * const copies = replayStream(2, sourceStream)
+ * 
+ * for await (const streamCopy of copies) {
+ *   // Each streamCopy is an independent consumer
+ *   processStream(streamCopy)
+ * }
+ */
+export async function* replayStream<T>(
+  bufferSize: number,
+  source: AsyncIterable<T>,
+): AsyncGenerator<AsyncIterable<T>, void, void> {
+  const factory = replayFactory(bufferSize, source)
+  
+  // Emit copies indefinitely until the caller stops asking
+  while (true) {
+    yield factory()
+  }
+}
+
+#+end_src
+
+* Key Concepts
+
+This section explains important concepts for working with async generator streams.
+
+** Backpressure
+
+Async generators are *pull-based*: values are only produced when a consumer requests them via =.next()=.
+This provides natural backpressure — if your consumer is slow, the producer automatically waits.
+
+#+begin_example
+Push-based (Observables):          Pull-based (Async Generators):
+
+  Producer                           Producer
+     │                                  │
+     ▼ emit(1)                          │ (idle)
+     ▼ emit(2)                          │
+     ▼ emit(3)     ← Consumer           ▼ .next() ← Consumer ready
+     ▼ emit(4)       overwhelmed!       │ yield 1
+     ▼ emit(5)                          │ (waits for next pull)
+     │                                  ▼ .next() ← Consumer ready
+  Buffer overflow?                      │ yield 2
+                                        │ ...
+#+end_example
+
+This means you don't need explicit buffering strategies for slow consumers — the async iteration protocol handles it naturally.
+
+** Cancellation
+
+Async iterators support cancellation via the =return()= method.
+When you =break= from a =for await...of= loop, JavaScript automatically calls =return()= on the iterator.
+
+#+begin_example javascript
+// Cancellation happens automatically when breaking from a loop
+for await (const value of someStream) {
+  if (value > 100) break;  // Iterator's return() is called
+}
+
+// Manual cancellation
+const iterator = someStream[Symbol.asyncIterator]();
+await iterator.next();  // Get first value
+await iterator.return();  // Cancel — cleanup runs
+#+end_example
+
+For cleanup logic (closing connections, clearing timers), use =try/finally= in your generators:
+
+#+begin_example javascript
+async function* resourceStream() {
+  const connection = await openConnection();
+  try {
+    while (true) {
+      yield await connection.read();
+    }
+  } finally {
+    // Runs on normal completion OR cancellation
+    await connection.close();
+  }
+}
+#+end_example
+
+** Memory Considerations
+
+*Unbounded buffering:* Be cautious with operators like =replay(Infinity, ...)= on long-running or infinite streams — they buffer all values in memory.
+
+*Holding iterator references:* An async generator cannot be garbage collected while something holds a reference to its iterator.
+If you create an iterator but never consume it, the generator function remains suspended indefinitely.
+
+#+begin_example javascript
+// ⚠️ Potential memory leak
+const iterator = infiniteStream[Symbol.asyncIterator]();
+await iterator.next();  // Generator is now suspended
+// If you forget about 'iterator', the generator stays in memory
+
+// ✓ Always clean up when done
+await iterator.return();  // Allows garbage collection
+#+end_example
+
+*Never-completing streams:* When merging or combining streams, remember that the combined stream won't complete until all source streams complete.
+For streams that never complete (like =periodic= or event streams), use =take=, =takeUntil=, or =untilStream= to ensure termination.
+
+* Project Configuration
+
+Configuration files for building and testing the library.
+
+** =package.json=
+
+#+begin_src json :tangle package.json
+{
+  "name": "agent-rex",
+  "version": "0.1.0",
+  "description": "An Async Generator/Iterator Based FRP-Like Library for JavaScript",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0",
+    "typescript": "^5.6.0"
+  },
+  "author": "Timothy Hope",
+  "license": "MIT"
+}
+#+end_src
+
+** =vitest.config.ts=
+
+#+begin_src typescript :tangle vitest.config.ts
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    globals: true,
+    include: ['**/*.test.ts'],
+    testTimeout: 5000,
+  },
+})
+#+end_src
+
+** =tsconfig.json=
+
+#+begin_src json :tangle tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": ["*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
+#+end_src
+
+* Testing Infrastructure
+
+This section provides test helpers for ergonomic testing of async generator streams.
+These helpers focus on three key areas:
+
+1. *Stream Creation*: Easily create test streams with controlled timing
+2. *Stream Collection*: Collect stream values into arrays or with timing metadata
+3. *Assertions*: Custom matchers for stream behavior verification
+
+** Test Helpers
+
+The test helpers are designed to make testing async streams as intuitive as testing synchronous code.
+
+*** =TestScheduler=
+
+A virtual time scheduler for deterministic testing of time-based operations.
+This allows tests to run instantly without waiting for real time to pass.
+
+#+begin_example
+Usage:
+  const scheduler = new TestScheduler()
+  
+  // Schedule events at virtual times
+  scheduler.schedule(100, () => emit(1))
+  scheduler.schedule(200, () => emit(2))
+  
+  // Advance virtual time
+  await scheduler.advanceTo(150)  // First event fires
+  await scheduler.advanceTo(300)  // Second event fires
+#+end_example
+
+#+begin_src typescript :tangle test-helpers.ts
+/**
+ * A virtual time scheduler for deterministic async stream testing.
+ * Allows you to control time progression without waiting for real time.
+ */
+export class TestScheduler {
+  private currentTime = 0
+  private queue: Array<{ time: number; action: () => void }> = []
+  private resolvers: Array<{ time: number; resolve: () => void }> = []
+
+  /**
+   * Get the current virtual time in milliseconds.
+   */
+  get now(): number {
+    return this.currentTime
+  }
+
+  /**
+   * Schedule an action to run at a specific virtual time.
+   */
+  schedule(time: number, action: () => void): void {
+    this.queue.push({ time, action })
+    this.queue.sort((a, b) => a.time - b.time)
+  }
+
+  /**
+   * Create a promise that resolves after a virtual delay.
+   * Use this instead of `setTimeout` in test streams.
+   */
+  delay(ms: number): Promise<void> {
+    const targetTime = this.currentTime + ms
+    return new Promise(resolve => {
+      this.resolvers.push({ time: targetTime, resolve })
+      this.resolvers.sort((a, b) => a.time - b.time)
+    })
+  }
+
+  /**
+   * Advance virtual time to a specific point, executing all scheduled actions.
+   */
+  async advanceTo(time: number): Promise<void> {
+    while (this.queue.length > 0 || this.resolvers.length > 0) {
+      const nextQueued = this.queue[0]?.time ?? Infinity
+      const nextResolver = this.resolvers[0]?.time ?? Infinity
+      const nextTime = Math.min(nextQueued, nextResolver)
+
+      if (nextTime > time) break
+
+      this.currentTime = nextTime
+
+      // Process all actions at this time
+      while (this.queue[0]?.time === nextTime) {
+        const { action } = this.queue.shift()!
+        action()
+      }
+
+      // Resolve all delays at this time
+      while (this.resolvers[0]?.time === nextTime) {
+        const { resolve } = this.resolvers.shift()!
+        resolve()
+      }
+
+      // Allow microtasks to run
+      await Promise.resolve()
+    }
+
+    this.currentTime = time
+  }
+
+  /**
+   * Advance virtual time by a relative amount.
+   */
+  async advanceBy(ms: number): Promise<void> {
+    await this.advanceTo(this.currentTime + ms)
+  }
+
+  /**
+   * Run all scheduled actions to completion.
+   */
+  async flush(): Promise<void> {
+    const maxTime = Math.max(
+      ...this.queue.map(q => q.time),
+      ...this.resolvers.map(r => r.time),
+      this.currentTime
+    )
+    await this.advanceTo(maxTime)
+  }
+
+  /**
+   * Reset the scheduler to initial state.
+   */
+  reset(): void {
+    this.currentTime = 0
+    this.queue = []
+    this.resolvers = []
+  }
+}
+
+#+end_src
+
+*** =TestStream=
+
+A controllable async generator for testing.
+Values can be pushed manually, allowing precise control over when emissions occur.
+
+#+begin_example
+Usage:
+  const stream = new TestStream<number>()
+  
+  // Push values (can be done from anywhere)
+  stream.push(1)
+  stream.push(2)
+  stream.complete()
+  
+  // Consume in test
+  const values = await collect(stream)
+  expect(values).toEqual([1, 2])
+#+end_example
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * A controllable async stream for testing.
+ * Push values manually and control completion/errors.
+ */
+export class TestStream<T> implements AsyncIterable<T> {
+  private queue: T[] = []
+  private waiting: ((value: IteratorResult<T>) => void) | null = null
+  private done = false
+  private error: Error | null = null
+
+  /**
+   * Push a value to the stream.
+   * If a consumer is waiting, it receives the value immediately.
+   */
+  push(value: T): void {
+    if (this.done) throw new Error('Cannot push to completed stream')
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value, done: false })
+    } else {
+      this.queue.push(value)
+    }
+  }
+
+  /**
+   * Push multiple values to the stream.
+   */
+  pushAll(...values: T[]): void {
+    values.forEach(v => this.push(v))
+  }
+
+  /**
+   * Signal that the stream is complete.
+   * No more values can be pushed after this.
+   */
+  complete(): void {
+    this.done = true
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: undefined as any, done: true })
+    }
+  }
+
+  /**
+   * Signal an error on the stream.
+   */
+  throw(error: Error): void {
+    this.error = error
+    this.done = true
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      // We'll handle this in next()
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: async (): Promise<IteratorResult<T>> => {
+        if (this.error) throw this.error
+        if (this.queue.length > 0) {
+          return { value: this.queue.shift()!, done: false }
+        }
+        if (this.done) {
+          return { value: undefined as any, done: true }
+        }
+        return new Promise(resolve => {
+          this.waiting = resolve
+          // Check for error after setting waiting
+          if (this.error) {
+            this.waiting = null
+            throw this.error
+          }
+        })
+      }
+    }
+  }
+}
+
+#+end_src
+
+*** =collect=
+
+Collectors for gathering stream values into arrays.
+Essential for making assertions about stream output.
+
+#+begin_example
+Usage:
+  // Basic collection
+  const values = await collect(from([1, 2, 3]))
+  expect(values).toEqual([1, 2, 3])
+  
+  // With timing information
+  const timed = await collectWithTime(stream)
+  // [{ value: 1, time: 0 }, { value: 2, time: 100 }, ...]
+  
+  // Collect first N values
+  const first3 = await collectN(3, infiniteStream)
+#+end_example
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * Collect all values from a stream into an array.
+ * The stream must complete for this to resolve.
+ */
+export async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const values: T[] = []
+  for await (const value of stream) values.push(value)
+  return values
+}
+
+/**
+ * Collected value with timing metadata.
+ */
+export interface TimedValue<T> {
+  value: T
+  /** Milliseconds since collection started */
+  elapsed: number
+}
+
+/**
+ * Collect all values from a stream with timing information.
+ * Useful for testing time-based operations.
+ */
+export async function collectWithTime<T>(
+  stream: AsyncIterable<T>
+): Promise<TimedValue<T>[]> {
+  const values: TimedValue<T>[] = []
+  const start = Date.now()
+  for await (const value of stream) {
+    values.push({ value, elapsed: Date.now() - start })
+  }
+  return values
+}
+
+/**
+ * Collect exactly N values from a stream.
+ * Useful for testing infinite or long-running streams.
+ */
+export async function collectN<T>(
+  n: number,
+  stream: AsyncIterable<T>
+): Promise<T[]> {
+  const values: T[] = []
+  for await (const value of stream) {
+    values.push(value)
+    if (values.length >= n) break
+  }
+  return values
+}
+
+/**
+ * Collect values until a predicate returns true.
+ * The matching value is included in the result.
+ */
+export async function collectUntil<T>(
+  predicate: (value: T) => boolean,
+  stream: AsyncIterable<T>
+): Promise<T[]> {
+  const values: T[] = []
+  for await (const value of stream) {
+    values.push(value)
+    if (predicate(value)) break
+  }
+  return values
+}
+
+/**
+ * Collect values with a timeout.
+ * Returns whatever was collected when the timeout expires.
+ */
+export async function collectWithTimeout<T>(
+  ms: number,
+  stream: AsyncIterable<T>
+): Promise<T[]> {
+  const values: T[] = []
+  const iterator = stream[Symbol.asyncIterator]()
+  const timeout = new Promise<'timeout'>(resolve => 
+    setTimeout(() => resolve('timeout'), ms)
+  )
+
+  while (true) {
+    const result = await Promise.race([iterator.next(), timeout])
+    if (result === 'timeout') break
+    if (result.done) break
+    values.push(result.value)
+  }
+
+  return values
+}
+
+#+end_src
+
+*** =marble=
+
+Marble testing helpers for visual stream descriptions.
+Inspired by RxJS marble diagrams.
+
+#+begin_example
+Marble syntax:
+  '-'  = 10ms of time passing
+  'a'  = emit value (from values object)
+  '|'  = complete
+  '#'  = error
+  '()' = sync grouping (multiple values at same time)
+  
+Usage:
+  const stream = marble('-a-b-c|', { a: 1, b: 2, c: 3 })
+  // Emits 1 at 10ms, 2 at 30ms, 3 at 50ms, completes at 60ms
+  
+  expect(await collect(stream)).toEqual([1, 2, 3])
+#+end_example
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * Options for marble stream creation.
+ */
+export interface MarbleOptions<T> {
+  /** Map of characters to their emission values */
+  values?: Record<string, T>
+  /** Time per frame (each '-' or character), default 10ms */
+  frameTime?: number
+  /** Error to throw when '#' is encountered */
+  error?: Error
+}
+
+/**
+ * Create a stream from a marble diagram string.
+ * 
+ * Marble syntax:
+ * - '-' advances time by one frame
+ * - Letters emit the corresponding value from the values map
+ * - '|' completes the stream
+ * - '#' errors the stream
+ * - '()' groups emissions at the same time point
+ * 
+ * @example
+ * const stream = marble('-a-b-|', { a: 1, b: 2 })
+ * // Emits 1 at 10ms, 2 at 30ms, completes at 50ms
+ */
+export async function* marble<T>(
+  diagram: string,
+  options: MarbleOptions<T> = {}
+): AsyncGenerator<T, void, void> {
+  const { values = {} as Record<string, T>, frameTime = 10, error = new Error('marble error') } = options
+  let i = 0
+  let inGroup = false
+  let groupValues: T[] = []
+
+  while (i < diagram.length) {
+    const char = diagram[i]
+
+    if (char === '-') {
+      if (!inGroup) await delay(frameTime)
+    } else if (char === '|') {
+      return
+    } else if (char === '#') {
+      throw error
+    } else if (char === '(') {
+      inGroup = true
+      groupValues = []
+    } else if (char === ')') {
+      inGroup = false
+      for (const v of groupValues) yield v
+      await delay(frameTime)
+    } else if (char === ' ') {
+      // Ignore spaces (for readability)
+    } else {
+      const value = values[char] ?? (char as unknown as T)
+      if (inGroup) {
+        groupValues.push(value)
+      } else {
+        yield value
+        await delay(frameTime)
+      }
+    }
+    i++
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Parse a marble diagram into a sequence of events for testing.
+ * Returns the expected values and their relative times.
+ */
+export function parseMarble<T>(
+  diagram: string,
+  options: MarbleOptions<T> = {}
+): Array<{ time: number; value: T }> {
+  const { values = {} as Record<string, T>, frameTime = 10 } = options
+  const events: Array<{ time: number; value: T }> = []
+  let time = 0
+  let i = 0
+  let inGroup = false
+
+  while (i < diagram.length) {
+    const char = diagram[i]
+
+    if (char === '-') {
+      if (!inGroup) time += frameTime
+    } else if (char === '|' || char === '#') {
+      // Completion/error markers don't emit values
+    } else if (char === '(') {
+      inGroup = true
+    } else if (char === ')') {
+      inGroup = false
+      time += frameTime
+    } else if (char === ' ') {
+      // Ignore spaces
+    } else {
+      const value = values[char] ?? (char as unknown as T)
+      events.push({ time, value })
+      if (!inGroup) time += frameTime
+    }
+    i++
+  }
+
+  return events
+}
+
+#+end_src
+
+*** =drainN=
+
+Drain helpers for consuming streams without collecting values.
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * Consume N values from a stream, discarding them.
+ * Useful for advancing a stream to a certain point.
+ */
+export async function drainN<T>(
+  n: number,
+  stream: AsyncIterable<T>
+): Promise<void> {
+  let count = 0
+  for await (const _ of stream) {
+    if (++count >= n) break
+  }
+}
+
+/**
+ * Consume all values from a stream, discarding them.
+ * Useful for ensuring a stream completes.
+ */
+export async function drain<T>(stream: AsyncIterable<T>): Promise<void> {
+  for await (const _ of stream) { /* consume */ }
+}
+
+#+end_src
+
+*** =spy=
+
+Spy wrappers for observing stream behavior in tests.
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * A record of events that occurred on a spied stream.
+ */
+export interface SpyEvent<T> {
+  type: 'value' | 'complete' | 'error'
+  value?: T
+  error?: Error
+  time: number
+}
+
+/**
+ * A spy that records stream events for later assertion.
+ */
+export interface StreamSpy<T> {
+  /** The wrapped stream to consume */
+  stream: AsyncIterable<T>
+  /** All recorded events */
+  events: SpyEvent<T>[]
+  /** Just the emitted values */
+  values: T[]
+  /** Whether the stream completed */
+  completed: boolean
+  /** The error if one occurred */
+  error?: Error
+  /** Wait for N values to be emitted */
+  waitForN(n: number): Promise<T[]>
+  /** Wait for completion */
+  waitForComplete(): Promise<void>
+}
+
+/**
+ * Wrap a stream with a spy to record all events.
+ * 
+ * @example
+ * const spied = spy(myStream)
+ * await collect(spied.stream)
+ * expect(spied.values).toEqual([1, 2, 3])
+ * expect(spied.completed).toBe(true)
+ */
+export function spy<T>(source: AsyncIterable<T>): StreamSpy<T> {
+  const startTime = Date.now()
+  const events: SpyEvent<T>[] = []
+  const values: T[] = []
+  let completed = false
+  let error: Error | undefined
+  let valueListeners: Array<{ count: number; resolve: (values: T[]) => void }> = []
+  let completeListeners: Array<() => void> = []
+
+  const stream: AsyncIterable<T> = {
+    [Symbol.asyncIterator]() {
+      const iterator = source[Symbol.asyncIterator]()
+      return {
+        async next(): Promise<IteratorResult<T>> {
+          try {
+            const result = await iterator.next()
+            if (result.done) {
+              completed = true
+              events.push({ type: 'complete', time: Date.now() - startTime })
+              completeListeners.forEach(l => l())
+              return result
+            }
+            values.push(result.value)
+            events.push({ type: 'value', value: result.value, time: Date.now() - startTime })
+            checkValueListeners()
+            return result
+          } catch (e) {
+            error = e as Error
+            events.push({ type: 'error', error, time: Date.now() - startTime })
+            throw e
+          }
+        }
+      }
+    }
+  }
+
+  function checkValueListeners() {
+    valueListeners = valueListeners.filter(({ count, resolve }) => {
+      if (values.length >= count) {
+        resolve([...values])
+        return false
+      }
+      return true
+    })
+  }
+
+  return {
+    stream,
+    events,
+    values,
+    get completed() { return completed },
+    get error() { return error },
+    waitForN(n: number): Promise<T[]> {
+      if (values.length >= n) return Promise.resolve([...values])
+      return new Promise(resolve => {
+        valueListeners.push({ count: n, resolve })
+      })
+    },
+    waitForComplete(): Promise<void> {
+      if (completed) return Promise.resolve()
+      return new Promise(resolve => {
+        completeListeners.push(resolve)
+      })
+    }
+  }
+}
+
+#+end_src
+
+*** =expectStream=
+
+Fluent assertion helpers for testing stream behavior.
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * Fluent assertion builder for streams.
+ */
+export interface StreamExpectation<T> {
+  /** Assert the stream emits exactly these values */
+  toEmit(expected: T[]): Promise<void>
+  /** Assert the stream emits values matching a predicate */
+  toEmitMatching(predicate: (values: T[]) => boolean): Promise<void>
+  /** Assert the stream emits at least N values */
+  toEmitAtLeast(n: number): Promise<T[]>
+  /** Assert the stream completes */
+  toComplete(): Promise<void>
+  /** Assert the stream errors */
+  toError(): Promise<Error>
+  /** Assert the stream errors with a specific message */
+  toErrorWith(message: string | RegExp): Promise<void>
+  /** Assert the stream is empty */
+  toBeEmpty(): Promise<void>
+  /** Assert first N values match */
+  firstN(n: number): StreamExpectation<T>
+}
+
+/**
+ * Create fluent assertions for a stream.
+ * 
+ * @example
+ * await expectStream(from([1, 2, 3])).toEmit([1, 2, 3])
+ * await expectStream(empty()).toBeEmpty()
+ * await expectStream(throwError(new Error('oops'))).toError()
+ */
+export function expectStream<T>(stream: AsyncIterable<T>): StreamExpectation<T> {
+  let limit: number | undefined
+
+  const createExpectation = (s: AsyncIterable<T>): StreamExpectation<T> => ({
+    async toEmit(expected: T[]): Promise<void> {
+      const actual = limit !== undefined 
+        ? await collectN(limit, s)
+        : await collect(s)
+      if (!arraysEqual(actual, expected)) {
+        throw new Error(
+          `Expected stream to emit ${JSON.stringify(expected)}, but got ${JSON.stringify(actual)}`
+        )
+      }
+    },
+
+    async toEmitMatching(predicate: (values: T[]) => boolean): Promise<void> {
+      const values = limit !== undefined
+        ? await collectN(limit, s)
+        : await collect(s)
+      if (!predicate(values)) {
+        throw new Error(
+          `Stream values ${JSON.stringify(values)} did not match predicate`
+        )
+      }
+    },
+
+    async toEmitAtLeast(n: number): Promise<T[]> {
+      const values = await collectN(n, s)
+      if (values.length < n) {
+        throw new Error(
+          `Expected stream to emit at least ${n} values, but got ${values.length}`
+        )
+      }
+      return values
+    },
+
+    async toComplete(): Promise<void> {
+      await collect(s)
+      // If we get here without error, stream completed
+    },
+
+    async toError(): Promise<Error> {
+      try {
+        await collect(s)
+        throw new Error('Expected stream to error, but it completed')
+      } catch (e) {
+        return e as Error
+      }
+    },
+
+    async toErrorWith(message: string | RegExp): Promise<void> {
+      try {
+        await collect(s)
+        throw new Error('Expected stream to error, but it completed')
+      } catch (e) {
+        const error = e as Error
+        const matches = typeof message === 'string'
+          ? error.message === message
+          : message.test(error.message)
+        if (!matches) {
+          throw new Error(
+            `Expected error message to match ${message}, but got "${error.message}"`
+          )
+        }
+      }
+    },
+
+    async toBeEmpty(): Promise<void> {
+      const values = await collect(s)
+      if (values.length > 0) {
+        throw new Error(
+          `Expected stream to be empty, but got ${JSON.stringify(values)}`
+        )
+      }
+    },
+
+    firstN(n: number): StreamExpectation<T> {
+      limit = n
+      return this
+    }
+  })
+
+  return createExpectation(stream)
+}
+
+function arraysEqual<T>(a: T[], b: T[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((v, i) => v === b[i])
+}
+
+#+end_src
+
+*** =createAsyncIterable=
+
+Utility for quickly creating async iterables from arrays with optional delays.
+
+#+begin_src typescript :tangle test-helpers.ts
+
+/**
+ * Options for creating an async iterable.
+ */
+export interface AsyncIterableOptions {
+  /** Delay between emissions in milliseconds */
+  delay?: number
+  /** Delay before first emission */
+  initialDelay?: number
+}
+
+/**
+ * Create an async iterable from an array with optional timing.
+ * 
+ * @example
+ * const stream = createAsyncIterable([1, 2, 3], { delay: 100 })
+ * // Emits 1, then waits 100ms, emits 2, waits 100ms, emits 3
+ */
+export async function* createAsyncIterable<T>(
+  values: T[],
+  options: AsyncIterableOptions = {}
+): AsyncGenerator<T, void, void> {
+  const { delay: delayMs = 0, initialDelay = 0 } = options
+
+  if (initialDelay > 0) {
+    await new Promise(r => setTimeout(r, initialDelay))
+  }
+
+  for (let i = 0; i < values.length; i++) {
+    yield values[i]
+    if (delayMs > 0 && i < values.length - 1) {
+      await new Promise(r => setTimeout(r, delayMs))
+    }
+  }
+}
+
+#+end_src
+
+** Example Tests
+
+Here is an example test file demonstrating the test helpers:
+
+#+begin_src typescript :tangle index.test.ts
+import { describe, it, expect } from 'vitest'
+import {
+  collect,
+  collectN,
+  collectWithTime,
+  marble,
+  TestStream,
+  spy,
+  expectStream,
+  createAsyncIterable
+} from './test-helpers'
+import {
+  just,
+  from,
+  map,
+  filter,
+  take,
+  merge,
+  scan,
+  empty,
+  throwError,
+  concat,
+  skip,
+  ReplaySubject,
+  replay,
+  share
+} from './index'
+
+describe('Stream Creators', () => {
+  describe('just', () => {
+    it('emits a single value and completes', async () => {
+      const values = await collect(just(42))
+      expect(values).toEqual([42])
+    })
+  })
+
+  describe('from', () => {
+    it('emits all values from an array', async () => {
+      const values = await collect(from([1, 2, 3]))
+      expect(values).toEqual([1, 2, 3])
+    })
+
+    it('handles empty arrays', async () => {
+      await expectStream(from([])).toBeEmpty()
+    })
+  })
+
+  describe('empty', () => {
+    it('completes immediately without emitting', async () => {
+      await expectStream(empty()).toBeEmpty()
+    })
+  })
+})
+
+describe('Transformations', () => {
+  describe('map', () => {
+    it('transforms each value', async () => {
+      const result = await collect(map(x => x * 2, from([1, 2, 3])))
+      expect(result).toEqual([2, 4, 6])
+    })
+
+    it('handles async mappers', async () => {
+      const result = await collect(
+        map(async x => x * 2, from([1, 2, 3]))
+      )
+      expect(result).toEqual([2, 4, 6])
+    })
+  })
+
+  describe('filter', () => {
+    it('keeps values matching predicate', async () => {
+      const result = await collect(filter(x => x % 2 === 0, from([1, 2, 3, 4])))
+      expect(result).toEqual([2, 4])
+    })
+  })
+
+  describe('scan', () => {
+    it('accumulates values starting with seed', async () => {
+      const result = await collect(scan((acc, x) => acc + x, 0, from([1, 2, 3])))
+      expect(result).toEqual([0, 1, 3, 6])
+    })
+  })
+})
+
+describe('Slicing', () => {
+  describe('take', () => {
+    it('takes only first N values', async () => {
+      const result = await collect(take(2, from([1, 2, 3, 4, 5])))
+      expect(result).toEqual([1, 2])
+    })
+  })
+
+  describe('skip', () => {
+    it('skips first N values', async () => {
+      const result = await collect(skip(2, from([1, 2, 3, 4, 5])))
+      expect(result).toEqual([3, 4, 5])
+    })
+  })
+})
+
+describe('Combining', () => {
+  describe('merge', () => {
+    it('merges multiple streams', async () => {
+      const a = createAsyncIterable([1, 3], { delay: 20 })
+      const b = createAsyncIterable([2, 4], { delay: 20, initialDelay: 10 })
+      const result = await collect(merge(a, b))
+      expect(result).toEqual([1, 2, 3, 4])
+    })
+  })
+
+  describe('concat', () => {
+    it('concatenates streams in order', async () => {
+      const result = await collect(concat(from([1, 2]), from([3, 4])))
+      expect(result).toEqual([1, 2, 3, 4])
+    })
+  })
+})
+
+describe('Error Handling', () => {
+  describe('throwError', () => {
+    it('creates a stream that immediately errors', async () => {
+      await expectStream(throwError(new Error('test error')))
+        .toErrorWith('test error')
+    })
+  })
+})
+
+describe('Test Helpers', () => {
+  describe('TestStream', () => {
+    it('allows manual value pushing', async () => {
+      const stream = new TestStream<number>()
+      
+      // Push values async
+      setTimeout(() => {
+        stream.push(1)
+        stream.push(2)
+        stream.complete()
+      }, 10)
+
+      const values = await collect(stream)
+      expect(values).toEqual([1, 2])
+    })
+  })
+
+  describe('marble', () => {
+    it('creates streams from marble diagrams', async () => {
+      const stream = marble('-a-b-c|', { values: { a: 1, b: 2, c: 3 } })
+      const result = await collect(stream)
+      expect(result).toEqual([1, 2, 3])
+    })
+  })
+
+  describe('spy', () => {
+    it('records stream events', async () => {
+      const spied = spy(from([1, 2, 3]))
+      await collect(spied.stream)
+      
+      expect(spied.values).toEqual([1, 2, 3])
+      expect(spied.completed).toBe(true)
+      expect(spied.events).toHaveLength(4) // 3 values + 1 complete
+    })
+  })
+
+  describe('collectWithTime', () => {
+    it('records timing of emissions', async () => {
+      const stream = createAsyncIterable([1, 2, 3], { delay: 50 })
+      const result = await collectWithTime(stream)
+      
+      expect(result.map(r => r.value)).toEqual([1, 2, 3])
+      expect(result[1].elapsed).toBeGreaterThanOrEqual(40)
+      expect(result[2].elapsed).toBeGreaterThanOrEqual(90)
+    })
+  })
+})
+
+describe('Multicasting', () => {
+  describe('ReplaySubject', () => {
+    it('replays buffered values to new subscribers', async () => {
+      const subject = new ReplaySubject<number>(2)
+      
+      subject.next(1)
+      subject.next(2)
+      subject.next(3)
+      subject.complete()
+      
+      // New subscriber gets last 2 values
+      const values = await collect(subject)
+      expect(values).toEqual([2, 3])
+    })
+
+    it('multicasts to multiple subscribers', async () => {
+      const subject = new ReplaySubject<number>()
+      
+      // Start two consumers
+      const consumer1: number[] = []
+      const consumer2: number[] = []
+      
+      const iter1 = subject[Symbol.asyncIterator]()
+      const iter2 = subject[Symbol.asyncIterator]()
+      
+      subject.next(1)
+      subject.next(2)
+      subject.complete()
+      
+      // Both should receive all values
+      let result = await iter1.next()
+      while (!result.done) {
+        consumer1.push(result.value)
+        result = await iter1.next()
+      }
+      
+      result = await iter2.next()
+      while (!result.done) {
+        consumer2.push(result.value)
+        result = await iter2.next()
+      }
+      
+      expect(consumer1).toEqual([1, 2])
+      expect(consumer2).toEqual([1, 2])
+    })
+  })
+
+  describe('replay', () => {
+    it('allows multiple consumers of a single source', async () => {
+      const source = from([1, 2, 3])
+      const shared = replay(Infinity, source)
+      
+      const values1 = await collect(shared)
+      const values2 = await collect(shared)
+      
+      expect(values1).toEqual([1, 2, 3])
+      expect(values2).toEqual([1, 2, 3])
+    })
+
+    it('respects buffer size', async () => {
+      const source = from([1, 2, 3, 4, 5])
+      const shared = replay(2, source)
+      
+      // First consumer triggers source consumption
+      const values1 = await collect(shared)
+      
+      // Second consumer only gets last 2 buffered values
+      const values2 = await collect(shared)
+      
+      expect(values1).toEqual([1, 2, 3, 4, 5])
+      expect(values2).toEqual([4, 5])
+    })
+  })
+
+  describe('share', () => {
+    it('shares without buffering', async () => {
+      const source = from([1, 2, 3])
+      const shared = share(source)
+      
+      // First consumer gets all values
+      const values1 = await collect(shared)
+      
+      // Second consumer gets nothing (no buffer)
+      const values2 = await collect(shared)
+      
+      expect(values1).toEqual([1, 2, 3])
+      expect(values2).toEqual([])
+    })
+  })
+})
+#+end_src
+

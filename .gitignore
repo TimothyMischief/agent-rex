@@ -1,0 +1,6 @@
+# Ignore everything
+*
+
+# Except the org file (source of truth)
+!.gitignore
+!index.org
