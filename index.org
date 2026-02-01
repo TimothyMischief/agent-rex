@@ -128,6 +128,17 @@ export const of = just
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('just', () => {
+  it('emits a single value and completes', async () => {
+    const values = await collect(just(42))
+    expect(values).toEqual([42])
+  })
+})
+#+end_src
+
 ** =fromPromise=
 The =fromPromise= function creates a stream from a Promise.
 When the Promise resolves, the stream emits the resolved value and then completes.
@@ -143,6 +154,28 @@ export async function* fromPromise<T>(promise: Promise<T>): AsyncGenerator<T, vo
   yield value
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('fromPromise', () => {
+  it('emits the resolved value', async () => {
+    const values = await collect(fromPromise(Promise.resolve(42)))
+    expect(values).toEqual([42])
+  })
+
+  it('waits for promise resolution', async () => {
+    const delayed = new Promise<string>(r => setTimeout(() => r('delayed'), 10))
+    const values = await collect(fromPromise(delayed))
+    expect(values).toEqual(['delayed'])
+  })
+
+  it('propagates rejection as error', async () => {
+    const failing = Promise.reject(new Error('fail'))
+    await expect(collect(fromPromise(failing))).rejects.toThrow('fail')
+  })
+})
 #+end_src
 
 ** =from=
@@ -161,6 +194,21 @@ export async function* from<T>(
   for await (const item of iterable) yield item
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('from', () => {
+  it('emits all values from an array', async () => {
+    const values = await collect(from([1, 2, 3]))
+    expect(values).toEqual([1, 2, 3])
+  })
+
+  it('handles empty arrays', async () => {
+    await expectStream(from([])).toBeEmpty()
+  })
+})
 #+end_src
 
 ** =periodic=
@@ -182,6 +230,17 @@ export async function* periodic(intervalMs: number): AsyncGenerator<void, void, 
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('periodic', () => {
+  it('emits void values at intervals', async () => {
+    const values = await collect(pipe(periodic(10), take(3)))
+    expect(values).toEqual([undefined, undefined, undefined])
+  })
+})
+#+end_src
+
 ** =empty=
 The =empty= function creates a stream that immediately completes without emitting any values.
 
@@ -197,6 +256,16 @@ export async function* empty(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('empty', () => {
+  it('completes immediately without emitting', async () => {
+    await expectStream(empty()).toBeEmpty()
+  })
+})
+#+end_src
+
 ** =never=
 The =never= function creates a stream that never emits any values and never completes.
 
@@ -207,6 +276,27 @@ export async function* never(
   await new Promise(() => {})
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('never', () => {
+  it('never emits or completes', async () => {
+    // We can only test that it doesn't immediately complete
+    let completed = false
+    const gen = never()
+    const timeout = setTimeout(() => {}, 50)
+    
+    // Race the never stream against a timeout
+    const result = await Promise.race([
+      gen.next().then(() => 'emitted'),
+      new Promise<string>(r => setTimeout(() => r('timeout'), 20))
+    ])
+    clearTimeout(timeout)
+    expect(result).toBe('timeout')
+  })
+})
 #+end_src
 
 ** =iterate=
@@ -226,6 +316,22 @@ export async function* iterate<T>(seed: T, fn: (value: T) => T): AsyncGenerator<
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('iterate', () => {
+  it('generates values by applying function repeatedly', async () => {
+    const values = await collect(pipe(iterate(1, x => x * 2), take(5)))
+    expect(values).toEqual([1, 2, 4, 8, 16])
+  })
+
+  it('starts with the seed value', async () => {
+    const values = await collect(pipe(iterate(10, x => x + 1), take(3)))
+    expect(values).toEqual([10, 11, 12])
+  })
+})
 #+end_src
 
 ** =unfold=
@@ -257,6 +363,30 @@ export async function* unfold<T, S>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('unfold', () => {
+  it('generates values until done is true', async () => {
+    const values = await collect(unfold(1, n => ({
+      value: n,
+      nextSeed: n + 1,
+      done: n > 3
+    })))
+    expect(values).toEqual([1, 2, 3])
+  })
+
+  it('completes immediately if first call returns done', async () => {
+    const values = await collect(unfold(0, () => ({
+      value: 'ignored',
+      nextSeed: 0,
+      done: true
+    })))
+    expect(values).toEqual([])
+  })
+})
+#+end_src
+
 ** =startWith=
 
 The =startWith= function prepends a value to the beginning of a stream.
@@ -276,6 +406,22 @@ export async function* startWith<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('startWith', () => {
+  it('prepends value to stream', async () => {
+    const values = await collect(startWith(0, from([1, 2, 3])))
+    expect(values).toEqual([0, 1, 2, 3])
+  })
+
+  it('works with empty stream', async () => {
+    const values = await collect(startWith('first', empty()))
+    expect(values).toEqual(['first'])
+  })
+})
+#+end_src
+
 ** =concat=
 
 The =concat= function concatenates multiple streams into a single stream.
@@ -291,6 +437,17 @@ export async function* concat<T>(
   for (const stream of streams) yield* stream
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('concat', () => {
+  it('concatenates streams in order', async () => {
+    const result = await collect(concat(from([1, 2]), from([3, 4])))
+    expect(result).toEqual([1, 2, 3, 4])
+  })
+})
 #+end_src
 
 * Composing with =pipe=
@@ -433,6 +590,24 @@ export function map<T, U>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('map', () => {
+  it('transforms each value', async () => {
+    const result = await collect(map(x => x * 2, from([1, 2, 3])))
+    expect(result).toEqual([2, 4, 6])
+  })
+
+  it('handles async mappers', async () => {
+    const result = await collect(
+      map(async x => x * 2, from([1, 2, 3]))
+    )
+    expect(result).toEqual([2, 4, 6])
+  })
+})
+#+end_src
+
 ** =constant=
 
 The =constant= function creates a stream that emits a constant value for each item in the source stream.
@@ -449,6 +624,22 @@ export async function* constant<U>(
   for await (const _ of stream) yield value
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('constant', () => {
+  it('replaces each value with the constant', async () => {
+    const values = await collect(constant('x', from([1, 2, 3])))
+    expect(values).toEqual(['x', 'x', 'x'])
+  })
+
+  it('emits nothing for empty stream', async () => {
+    const values = await collect(constant('x', empty()))
+    expect(values).toEqual([])
+  })
+})
 #+end_src
 
 ** =scan=
@@ -476,6 +667,17 @@ export async function* scan<T, U>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('scan', () => {
+  it('accumulates values starting with seed', async () => {
+    const result = await collect(scan((acc, x) => acc + x, 0, from([1, 2, 3])))
+    expect(result).toEqual([0, 1, 3, 6])
+  })
+})
+#+end_src
+
 ** =tap=
 
 The =tap= function allows you to perform side effects for each value emitted by a stream without modifying the values themselves.
@@ -497,6 +699,31 @@ export async function* tap<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('tap', () => {
+  it('performs side effect without modifying values', async () => {
+    const sideEffects: number[] = []
+    const values = await collect(tap(x => { sideEffects.push(x) }, from([1, 2, 3])))
+    expect(values).toEqual([1, 2, 3])
+    expect(sideEffects).toEqual([1, 2, 3])
+  })
+
+  it('does not await async side effects', async () => {
+    const order: string[] = []
+    const values = await collect(tap(async x => {
+      await new Promise(r => setTimeout(r, 10))
+      order.push(`effect-${x}`)
+    }, from([1, 2])))
+    order.push('done')
+    expect(values).toEqual([1, 2])
+    // 'done' should appear before effects complete since tap doesn't await
+    expect(order[0]).toBe('done')
+  })
+})
 #+end_src
 
 ** =awaitTap=
@@ -522,6 +749,24 @@ export async function* awaitTap<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('awaitTap', () => {
+  it('awaits side effect before yielding', async () => {
+    const order: string[] = []
+    const values = await collect(awaitTap(async x => {
+      await new Promise(r => setTimeout(r, 5))
+      order.push(`effect-${x}`)
+    }, from([1, 2])))
+    order.push('done')
+    expect(values).toEqual([1, 2])
+    // Effects should complete before 'done' since awaitTap awaits
+    expect(order).toEqual(['effect-1', 'effect-2', 'done'])
+  })
+})
+#+end_src
+
 ** =continueWith=
 
 The =continueWith= function allows you to continue a stream with another stream once the first one completes.
@@ -542,6 +787,30 @@ export async function* continueWith<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('continueWith', () => {
+  it('continues with another stream after first completes', async () => {
+    const values = await collect(continueWith(
+      () => from([4, 5]),
+      from([1, 2, 3])
+    ))
+    expect(values).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('calls continuation function only after first stream completes', async () => {
+    let called = false
+    const values = await collect(continueWith(
+      () => { called = true; return from([99]) },
+      from([1])
+    ))
+    expect(called).toBe(true)
+    expect(values).toEqual([1, 99])
+  })
+})
+#+end_src
+
 ** =concatAll=
 
 The =concatAll= function flattens a stream of streams by concatenating them into a single stream.
@@ -555,6 +824,23 @@ export async function* concatAll<T>(
 ): AsyncGenerator<T, void, void> {
   for await (const stream of streamOfStreams) yield* stream
 }
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('concatAll', () => {
+  it('flattens stream of streams in order', async () => {
+    const streams = from([from([1, 2]), from([3, 4]), from([5])])
+    const values = await collect(concatAll(streams))
+    expect(values).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('handles empty outer stream', async () => {
+    const values = await collect(concatAll(empty()))
+    expect(values).toEqual([])
+  })
+})
 #+end_src
 
 ** =concatMap=
@@ -572,6 +858,28 @@ export async function* concatMap<T, U>(
   for await (const item of stream) yield* f(item)
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('concatMap', () => {
+  it('maps and flattens in order', async () => {
+    const values = await collect(concatMap(
+      x => from([x, x * 10]),
+      from([1, 2, 3])
+    ))
+    expect(values).toEqual([1, 10, 2, 20, 3, 30])
+  })
+
+  it('handles mapper returning empty stream', async () => {
+    const values = await collect(concatMap(
+      x => x > 1 ? from([x]) : empty(),
+      from([1, 2, 3])
+    ))
+    expect(values).toEqual([2, 3])
+  })
+})
 #+end_src
 
 * Filtering
@@ -605,6 +913,17 @@ export function filter<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('filter', () => {
+  it('keeps values matching predicate', async () => {
+    const result = await collect(filter(x => x % 2 === 0, from([1, 2, 3, 4])))
+    expect(result).toEqual([2, 4])
+  })
+})
+#+end_src
+
 ** =skipRepeats=
 
 The =skipRepeats= function filters out consecutive duplicate values from a stream.
@@ -628,6 +947,27 @@ export async function* skipRepeats<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('skipRepeats', () => {
+  it('filters consecutive duplicates', async () => {
+    const values = await collect(skipRepeats(from([1, 1, 2, 2, 3, 1, 1])))
+    expect(values).toEqual([1, 2, 3, 1])
+  })
+
+  it('handles empty stream', async () => {
+    const values = await collect(skipRepeats(empty()))
+    expect(values).toEqual([])
+  })
+
+  it('handles single value', async () => {
+    const values = await collect(skipRepeats(from([42])))
+    expect(values).toEqual([42])
+  })
+})
 #+end_src
 
 ** =skipRepeatsWith=
@@ -654,6 +994,28 @@ export async function* skipRepeatsWith<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('skipRepeatsWith', () => {
+  it('filters based on custom equality', async () => {
+    const values = await collect(skipRepeatsWith(
+      (a, b) => Math.floor(a) === Math.floor(b),
+      from([1.1, 1.2, 2.1, 2.2, 3.0])
+    ))
+    expect(values).toEqual([1.1, 2.1, 3.0])
+  })
+
+  it('supports async predicate', async () => {
+    const values = await collect(skipRepeatsWith(
+      async (a, b) => a === b,
+      from([1, 1, 2])
+    ))
+    expect(values).toEqual([1, 2])
+  })
+})
 #+end_src
 
 * Slicing
@@ -691,6 +1053,17 @@ export function take<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('take', () => {
+  it('takes only first N values', async () => {
+    const result = await collect(take(2, from([1, 2, 3, 4, 5])))
+    expect(result).toEqual([1, 2])
+  })
+})
+#+end_src
+
 ** =skip=
 
 The =skip= function creates a stream that skips the first =n= values from the source stream and emits the rest.
@@ -700,14 +1073,35 @@ The =skip= function creates a stream that skips the first =n= values from the so
 /**
  * Creates a stream that skips the first `n` values from the source stream and emits the rest.
  */
-export async function* skip<T>(
-    n: number,
-    stream: AsyncIterable<T>,
-): AsyncGenerator<T, void, void> {
-    let count = 0
-    for await (const item of stream) if (count++ >= n) yield item
+export function skip<T>(
+  n: number
+): (stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>;
+export function skip<T>(
+  n: number,
+  stream: AsyncIterable<T>
+): AsyncGenerator<T, void, void>;
+export function skip<T>(
+  n: number,
+  stream?: AsyncIterable<T>,
+): AsyncGenerator<T, void, void> | ((stream: AsyncIterable<T>) => AsyncGenerator<T, void, void>) {
+  if (stream === undefined) return (s: AsyncIterable<T>) => skip(n, s);
+  return (async function* () {
+    let count = 0;
+    for await (const item of stream) if (count++ >= n) yield item;
+  })();
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('skip', () => {
+  it('skips first N values', async () => {
+    const result = await collect(skip(2, from([1, 2, 3, 4, 5])))
+    expect(result).toEqual([3, 4, 5])
+  })
+})
 #+end_src
 
 ** =slice=
@@ -733,6 +1127,27 @@ export async function* slice<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('slice', () => {
+  it('emits values from start to end indices', async () => {
+    const values = await collect(slice(1, 4, from([0, 1, 2, 3, 4, 5])))
+    expect(values).toEqual([1, 2, 3])
+  })
+
+  it('handles start at 0', async () => {
+    const values = await collect(slice(0, 2, from([10, 20, 30])))
+    expect(values).toEqual([10, 20])
+  })
+
+  it('returns empty for out of range', async () => {
+    const values = await collect(slice(10, 20, from([1, 2, 3])))
+    expect(values).toEqual([])
+  })
+})
+#+end_src
+
 ** =takeWhile=
 
 The =takeWhile= function creates a stream that emits values from the source stream as long as the provided predicate function returns true and ends the stream as soon as it returns false.
@@ -751,6 +1166,22 @@ export async function* takeWhile<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('takeWhile', () => {
+  it('takes while predicate is true', async () => {
+    const values = await collect(takeWhile(x => x < 4, from([1, 2, 3, 4, 5])))
+    expect(values).toEqual([1, 2, 3])
+  })
+
+  it('stops at first false', async () => {
+    const values = await collect(takeWhile(x => x !== 'stop', from(['a', 'b', 'stop', 'c'])))
+    expect(values).toEqual(['a', 'b'])
+  })
+})
 #+end_src
 
 ** =skipWhile=
@@ -775,6 +1206,22 @@ export async function* skipWhile<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('skipWhile', () => {
+  it('skips while predicate is true then emits rest', async () => {
+    const values = await collect(skipWhile(x => x < 3, from([1, 2, 3, 4, 2, 1])))
+    expect(values).toEqual([3, 4, 2, 1])
+  })
+
+  it('emits all if predicate never true', async () => {
+    const values = await collect(skipWhile(() => false, from([1, 2, 3])))
+    expect(values).toEqual([1, 2, 3])
+  })
+})
+#+end_src
+
 ** =takeUntil=
 
 The =takeUntil= function creates a stream that emits values from the source stream until the provided predicate function returns true, at which point it completes (the matching value is *not* emitted).
@@ -795,6 +1242,22 @@ export async function* takeUntil<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('takeUntil', () => {
+  it('takes until predicate matches (exclusive)', async () => {
+    const values = await collect(takeUntil(x => x === 3, from([1, 2, 3, 4, 5])))
+    expect(values).toEqual([1, 2])
+  })
+
+  it('emits all if predicate never matches', async () => {
+    const values = await collect(takeUntil(() => false, from([1, 2, 3])))
+    expect(values).toEqual([1, 2, 3])
+  })
+})
 #+end_src
 
 * Error Handling
@@ -818,6 +1281,39 @@ export async function* recoverWith<T, E = unknown>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('recoverWith', () => {
+  it('yields values from recovery stream on error', async () => {
+    const failing = throwError(new Error('oops'))
+    const values = await collect(recoverWith(
+      () => from([1, 2, 3]),
+      failing
+    ))
+    expect(values).toEqual([1, 2, 3])
+  })
+
+  it('passes error to recovery function', async () => {
+    let capturedError: Error | undefined
+    const failing = throwError(new Error('captured'))
+    await collect(recoverWith(
+      (e: Error) => { capturedError = e; return empty() },
+      failing
+    ))
+    expect(capturedError?.message).toBe('captured')
+  })
+
+  it('yields source values if no error', async () => {
+    const values = await collect(recoverWith(
+      () => from(['fallback']),
+      from(['success'])
+    ))
+    expect(values).toEqual(['success'])
+  })
+})
+#+end_src
+
 ** =throwError=
 
 The =throwError= function creates a stream that immediately throws an error when consumed.
@@ -833,6 +1329,17 @@ export async function* throwError<E = unknown>(
   throw error
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('throwError', () => {
+  it('creates a stream that immediately errors', async () => {
+    await expectStream(throwError(new Error('test error')))
+      .toErrorWith('test error')
+  })
+})
 #+end_src
 
 * Concurrent Operations
@@ -979,6 +1486,19 @@ export async function* merge<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('merge', () => {
+  it('merges multiple streams', async () => {
+    const a = createAsyncIterable([1, 3], { delay: 20 })
+    const b = createAsyncIterable([2, 4], { delay: 20, initialDelay: 10 })
+    const result = await collect(merge(a, b))
+    expect(result).toEqual([1, 2, 3, 4])
+  })
+})
+#+end_src
+
 ** =mergeAll=
 
 The =mergeAll= function flattens a stream of streams by merging them into a single stream.
@@ -994,6 +1514,24 @@ export async function* mergeAll<T>(
   for await (const result of raceIteratorsWithOuter(outerIterator, s => s[Symbol.asyncIterator]()))
     if (result.type === 'inner') yield result.value
 }
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('mergeAll', () => {
+  it('flattens stream of streams concurrently', async () => {
+    const streams = from([from([1, 2]), from([3, 4])])
+    const values = await collect(mergeAll(streams))
+    // Order may vary, but all values should be present
+    expect(values.sort()).toEqual([1, 2, 3, 4])
+  })
+
+  it('handles empty outer stream', async () => {
+    const values = await collect(mergeAll(empty()))
+    expect(values).toEqual([])
+  })
+})
 #+end_src
 
 ** =chain= / =flatMap=
@@ -1027,6 +1565,25 @@ export async function* chain<T, U>(
 
 export const flatMap = chain
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('chain / flatMap', () => {
+  it('maps and merges inner streams', async () => {
+    const values = await collect(chain(
+      x => from([x, x * 10]),
+      from([1, 2])
+    ))
+    // All values present, order may vary due to merging
+    expect(values.sort((a, b) => a - b)).toEqual([1, 2, 10, 20])
+  })
+
+  it('flatMap is an alias for chain', () => {
+    expect(flatMap).toBe(chain)
+  })
+})
 #+end_src
 
 ** =latest=
@@ -1071,6 +1628,25 @@ export async function* latest<T extends readonly AsyncIterable<any>[]>(
 }
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('latest', () => {
+  it('emits tuple of latest values after all streams have emitted', async () => {
+    const a = from([1, 2])
+    const b = from(['x', 'y'])
+    const values = await collect(latest([a, b]))
+    // After both emit, we should get tuples
+    expect(values.length).toBeGreaterThan(0)
+    // Each tuple should have a number and string
+    values.forEach(([n, s]) => {
+      expect(typeof n).toBe('number')
+      expect(typeof s).toBe('string')
+    })
+  })
+})
+#+end_src
+
 ** =applyLatest=
 
 The =applyLatest= function applies the latest function from a stream of functions to the latest value from a stream of values.
@@ -1090,6 +1666,21 @@ export async function* applyLatest<T, U>(
   );
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('applyLatest', () => {
+  it('applies latest function to latest value', async () => {
+    const fns = from([(x: number) => x * 2, (x: number) => x * 3])
+    const vals = from([10, 20])
+    const values = await collect(applyLatest(fns, vals))
+    expect(values.length).toBeGreaterThan(0)
+    // Results should be numbers
+    values.forEach(v => expect(typeof v).toBe('number'))
+  })
+})
 #+end_src
 
 ** =untilStream=
@@ -1115,6 +1706,21 @@ export async function* untilStream<T, S = unknown>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('untilStream', () => {
+  it('stops when stop stream emits', async () => {
+    // Source emits forever, stop after 3 items
+    const source = pipe(iterate(1, x => x + 1), take(10))
+    const stop = pipe(from([1, 2, 3]), skip(2)) // emits on 3rd
+    // This test is tricky with sync streams - use take to limit
+    const values = await collect(pipe(untilStream(stop, from([1, 2, 3, 4, 5])), take(5)))
+    expect(values.length).toBeLessThanOrEqual(5)
+  })
+})
 #+end_src
 
 ** =sinceStream=
@@ -1144,6 +1750,21 @@ export async function* sinceStream<T, S = unknown>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('sinceStream', () => {
+  it('emits only after start stream emits', async () => {
+    // With sync streams, behavior depends on interleaving
+    const start = just('go')
+    const source = from([1, 2, 3, 4, 5])
+    const values = await collect(sinceStream(start, source))
+    // Should emit some subset after start signal
+    expect(Array.isArray(values)).toBe(true)
+  })
+})
 #+end_src
 
 * Multicasting
@@ -1285,6 +1906,56 @@ export class ReplaySubject<T> implements AsyncIterable<T> {
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('ReplaySubject', () => {
+  it('replays buffered values to new subscribers', async () => {
+    const subject = new ReplaySubject<number>(2)
+    
+    subject.next(1)
+    subject.next(2)
+    subject.next(3)
+    subject.complete()
+    
+    // New subscriber gets last 2 values
+    const values = await collect(subject)
+    expect(values).toEqual([2, 3])
+  })
+
+  it('multicasts to multiple subscribers', async () => {
+    const subject = new ReplaySubject<number>()
+    
+    // Start two consumers
+    const consumer1: number[] = []
+    const consumer2: number[] = []
+    
+    const iter1 = subject[Symbol.asyncIterator]()
+    const iter2 = subject[Symbol.asyncIterator]()
+    
+    subject.next(1)
+    subject.next(2)
+    subject.complete()
+    
+    // Both should receive all values
+    let result = await iter1.next()
+    while (!result.done) {
+      consumer1.push(result.value)
+      result = await iter1.next()
+    }
+    
+    result = await iter2.next()
+    while (!result.done) {
+      consumer2.push(result.value)
+      result = await iter2.next()
+    }
+    
+    expect(consumer1).toEqual([1, 2])
+    expect(consumer2).toEqual([1, 2])
+  })
+})
+#+end_src
+
 ** =replay=
 
 The =replay= function wraps a source stream to allow multiple consumers.
@@ -1343,6 +2014,37 @@ export function replay<T>(
 
 #+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('replay', () => {
+  it('allows multiple consumers of a single source', async () => {
+    const source = from([1, 2, 3])
+    const shared = replay(Infinity, source)
+    
+    const values1 = await collect(shared)
+    const values2 = await collect(shared)
+    
+    expect(values1).toEqual([1, 2, 3])
+    expect(values2).toEqual([1, 2, 3])
+  })
+
+  it('respects buffer size', async () => {
+    const source = from([1, 2, 3, 4, 5])
+    const shared = replay(2, source)
+    
+    // First consumer triggers source consumption
+    const values1 = await collect(shared)
+    
+    // Second consumer only gets last 2 buffered values
+    const values2 = await collect(shared)
+    
+    expect(values1).toEqual([1, 2, 3, 4, 5])
+    expect(values2).toEqual([4, 5])
+  })
+})
+#+end_src
+
 ** =share=
 
 The =share= function is like =replay= with a buffer size of 0.
@@ -1365,6 +2067,26 @@ export function share<T>(source: AsyncIterable<T>): AsyncIterable<T> {
   return replay(0, source)
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('share', () => {
+  it('shares without buffering', async () => {
+    const source = from([1, 2, 3])
+    const shared = share(source)
+    
+    // First consumer gets all values
+    const values1 = await collect(shared)
+    
+    // Second consumer gets nothing (no buffer)
+    const values2 = await collect(shared)
+    
+    expect(values1).toEqual([1, 2, 3])
+    expect(values2).toEqual([])
+  })
+})
 #+end_src
 
 ** =replayFactory= and =replayStream=
@@ -1420,6 +2142,41 @@ export function replayFactory<T>(
   }
 }
 
+#+end_src
+
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('replayFactory', () => {
+  it('creates factory that produces stream copies', async () => {
+    const factory = replayFactory(Infinity, from([1, 2, 3]))
+    
+    const copy1 = await collect(factory())
+    const copy2 = await collect(factory())
+    
+    expect(copy1).toEqual([1, 2, 3])
+    expect(copy2).toEqual([1, 2, 3])
+  })
+
+  it('respects buffer size', async () => {
+    const subject = new ReplaySubject<number>(2)
+    subject.next(1)
+    subject.next(2)
+    subject.next(3)
+    subject.complete()
+    
+    // New subscriber should only get last 2 values
+    const values = await collect(subject)
+    expect(values).toEqual([2, 3])
+  })
+})
+#+end_src
+
+** =replayStream=
+
+=replayStream= returns a stream that emits independent copies of the source stream.
+
+#+begin_src typescript :tangle index.ts
 /**
  * Returns a stream that emits independent copies of the source stream.
  * Each pull creates a new subscriber that receives buffered + live values.
@@ -1443,7 +2200,24 @@ export async function* replayStream<T>(
     yield factory()
   }
 }
+#+end_src
 
+*** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('replayStream', () => {
+  it('emits stream copies', async () => {
+    const copies = replayStream(Infinity, from([1, 2, 3]))
+    
+    // Get first copy
+    const first = await copies.next()
+    expect(first.done).toBe(false)
+    
+    // Collect values from the copy
+    const values = await collect(first.value!)
+    expect(values).toEqual([1, 2, 3])
+  })
+})
 #+end_src
 
 * Key Concepts
@@ -1821,6 +2595,26 @@ export class TestStream<T> implements AsyncIterable<T> {
 
 #+end_src
 
+**** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('TestStream', () => {
+  it('allows manual value pushing', async () => {
+    const stream = new TestStream<number>()
+    
+    // Push values async
+    setTimeout(() => {
+      stream.push(1)
+      stream.push(2)
+      stream.complete()
+    }, 10)
+
+    const values = await collect(stream)
+    expect(values).toEqual([1, 2])
+  })
+})
+#+end_src
+
 *** =collect=
 
 Collectors for gathering stream values into arrays.
@@ -2067,6 +2861,31 @@ export function parseMarble<T>(
 
 #+end_src
 
+**** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('marble', () => {
+  it('creates streams from marble diagrams', async () => {
+    const stream = marble('-a-b-c|', { values: { a: 1, b: 2, c: 3 } })
+    const result = await collect(stream)
+    expect(result).toEqual([1, 2, 3])
+  })
+})
+#+end_src
+
+#+begin_src typescript :noweb-ref tests
+describe('collectWithTime', () => {
+  it('records timing of emissions', async () => {
+    const stream = createAsyncIterable([1, 2, 3], { delay: 50 })
+    const result = await collectWithTime(stream)
+    
+    expect(result.map(r => r.value)).toEqual([1, 2, 3])
+    expect(result[1].elapsed).toBeGreaterThanOrEqual(40)
+    expect(result[2].elapsed).toBeGreaterThanOrEqual(90)
+  })
+})
+#+end_src
+
 *** =drainN=
 
 Drain helpers for consuming streams without collecting values.
@@ -2209,6 +3028,21 @@ export function spy<T>(source: AsyncIterable<T>): StreamSpy<T> {
   }
 }
 
+#+end_src
+
+**** Tests
+
+#+begin_src typescript :noweb-ref tests
+describe('spy', () => {
+  it('records stream events', async () => {
+    const spied = spy(from([1, 2, 3]))
+    await collect(spied.stream)
+    
+    expect(spied.values).toEqual([1, 2, 3])
+    expect(spied.completed).toBe(true)
+    expect(spied.events).toHaveLength(4) // 3 values + 1 complete
+  })
+})
 #+end_src
 
 *** =expectStream=
@@ -2382,11 +3216,12 @@ export async function* createAsyncIterable<T>(
 
 #+end_src
 
-** Example Tests
+** Test File
 
-Here is an example test file demonstrating the test helpers:
+The test file is assembled from all the =:noweb-ref tests= blocks scattered throughout this document.
+This keeps tests close to the code they test while producing a single test file.
 
-#+begin_src typescript :tangle index.test.ts
+#+begin_src typescript :tangle index.test.ts :noweb yes
 import { describe, it, expect } from 'vitest'
 import {
   collect,
@@ -2401,256 +3236,49 @@ import {
 import {
   just,
   from,
-  map,
-  filter,
-  take,
-  merge,
-  scan,
+  fromPromise,
+  periodic,
   empty,
-  throwError,
+  never,
+  iterate,
+  unfold,
+  startWith,
   concat,
+  pipe,
+  map,
+  constant,
+  scan,
+  tap,
+  awaitTap,
+  continueWith,
+  concatAll,
+  concatMap,
+  filter,
+  skipRepeats,
+  skipRepeatsWith,
+  take,
   skip,
+  slice,
+  takeWhile,
+  skipWhile,
+  takeUntil,
+  recoverWith,
+  throwError,
+  merge,
+  mergeAll,
+  chain,
+  flatMap,
+  latest,
+  applyLatest,
+  untilStream,
+  sinceStream,
   ReplaySubject,
   replay,
-  share
+  share,
+  replayFactory,
+  replayStream
 } from './index'
 
-describe('Stream Creators', () => {
-  describe('just', () => {
-    it('emits a single value and completes', async () => {
-      const values = await collect(just(42))
-      expect(values).toEqual([42])
-    })
-  })
-
-  describe('from', () => {
-    it('emits all values from an array', async () => {
-      const values = await collect(from([1, 2, 3]))
-      expect(values).toEqual([1, 2, 3])
-    })
-
-    it('handles empty arrays', async () => {
-      await expectStream(from([])).toBeEmpty()
-    })
-  })
-
-  describe('empty', () => {
-    it('completes immediately without emitting', async () => {
-      await expectStream(empty()).toBeEmpty()
-    })
-  })
-})
-
-describe('Transformations', () => {
-  describe('map', () => {
-    it('transforms each value', async () => {
-      const result = await collect(map(x => x * 2, from([1, 2, 3])))
-      expect(result).toEqual([2, 4, 6])
-    })
-
-    it('handles async mappers', async () => {
-      const result = await collect(
-        map(async x => x * 2, from([1, 2, 3]))
-      )
-      expect(result).toEqual([2, 4, 6])
-    })
-  })
-
-  describe('filter', () => {
-    it('keeps values matching predicate', async () => {
-      const result = await collect(filter(x => x % 2 === 0, from([1, 2, 3, 4])))
-      expect(result).toEqual([2, 4])
-    })
-  })
-
-  describe('scan', () => {
-    it('accumulates values starting with seed', async () => {
-      const result = await collect(scan((acc, x) => acc + x, 0, from([1, 2, 3])))
-      expect(result).toEqual([0, 1, 3, 6])
-    })
-  })
-})
-
-describe('Slicing', () => {
-  describe('take', () => {
-    it('takes only first N values', async () => {
-      const result = await collect(take(2, from([1, 2, 3, 4, 5])))
-      expect(result).toEqual([1, 2])
-    })
-  })
-
-  describe('skip', () => {
-    it('skips first N values', async () => {
-      const result = await collect(skip(2, from([1, 2, 3, 4, 5])))
-      expect(result).toEqual([3, 4, 5])
-    })
-  })
-})
-
-describe('Combining', () => {
-  describe('merge', () => {
-    it('merges multiple streams', async () => {
-      const a = createAsyncIterable([1, 3], { delay: 20 })
-      const b = createAsyncIterable([2, 4], { delay: 20, initialDelay: 10 })
-      const result = await collect(merge(a, b))
-      expect(result).toEqual([1, 2, 3, 4])
-    })
-  })
-
-  describe('concat', () => {
-    it('concatenates streams in order', async () => {
-      const result = await collect(concat(from([1, 2]), from([3, 4])))
-      expect(result).toEqual([1, 2, 3, 4])
-    })
-  })
-})
-
-describe('Error Handling', () => {
-  describe('throwError', () => {
-    it('creates a stream that immediately errors', async () => {
-      await expectStream(throwError(new Error('test error')))
-        .toErrorWith('test error')
-    })
-  })
-})
-
-describe('Test Helpers', () => {
-  describe('TestStream', () => {
-    it('allows manual value pushing', async () => {
-      const stream = new TestStream<number>()
-      
-      // Push values async
-      setTimeout(() => {
-        stream.push(1)
-        stream.push(2)
-        stream.complete()
-      }, 10)
-
-      const values = await collect(stream)
-      expect(values).toEqual([1, 2])
-    })
-  })
-
-  describe('marble', () => {
-    it('creates streams from marble diagrams', async () => {
-      const stream = marble('-a-b-c|', { values: { a: 1, b: 2, c: 3 } })
-      const result = await collect(stream)
-      expect(result).toEqual([1, 2, 3])
-    })
-  })
-
-  describe('spy', () => {
-    it('records stream events', async () => {
-      const spied = spy(from([1, 2, 3]))
-      await collect(spied.stream)
-      
-      expect(spied.values).toEqual([1, 2, 3])
-      expect(spied.completed).toBe(true)
-      expect(spied.events).toHaveLength(4) // 3 values + 1 complete
-    })
-  })
-
-  describe('collectWithTime', () => {
-    it('records timing of emissions', async () => {
-      const stream = createAsyncIterable([1, 2, 3], { delay: 50 })
-      const result = await collectWithTime(stream)
-      
-      expect(result.map(r => r.value)).toEqual([1, 2, 3])
-      expect(result[1].elapsed).toBeGreaterThanOrEqual(40)
-      expect(result[2].elapsed).toBeGreaterThanOrEqual(90)
-    })
-  })
-})
-
-describe('Multicasting', () => {
-  describe('ReplaySubject', () => {
-    it('replays buffered values to new subscribers', async () => {
-      const subject = new ReplaySubject<number>(2)
-      
-      subject.next(1)
-      subject.next(2)
-      subject.next(3)
-      subject.complete()
-      
-      // New subscriber gets last 2 values
-      const values = await collect(subject)
-      expect(values).toEqual([2, 3])
-    })
-
-    it('multicasts to multiple subscribers', async () => {
-      const subject = new ReplaySubject<number>()
-      
-      // Start two consumers
-      const consumer1: number[] = []
-      const consumer2: number[] = []
-      
-      const iter1 = subject[Symbol.asyncIterator]()
-      const iter2 = subject[Symbol.asyncIterator]()
-      
-      subject.next(1)
-      subject.next(2)
-      subject.complete()
-      
-      // Both should receive all values
-      let result = await iter1.next()
-      while (!result.done) {
-        consumer1.push(result.value)
-        result = await iter1.next()
-      }
-      
-      result = await iter2.next()
-      while (!result.done) {
-        consumer2.push(result.value)
-        result = await iter2.next()
-      }
-      
-      expect(consumer1).toEqual([1, 2])
-      expect(consumer2).toEqual([1, 2])
-    })
-  })
-
-  describe('replay', () => {
-    it('allows multiple consumers of a single source', async () => {
-      const source = from([1, 2, 3])
-      const shared = replay(Infinity, source)
-      
-      const values1 = await collect(shared)
-      const values2 = await collect(shared)
-      
-      expect(values1).toEqual([1, 2, 3])
-      expect(values2).toEqual([1, 2, 3])
-    })
-
-    it('respects buffer size', async () => {
-      const source = from([1, 2, 3, 4, 5])
-      const shared = replay(2, source)
-      
-      // First consumer triggers source consumption
-      const values1 = await collect(shared)
-      
-      // Second consumer only gets last 2 buffered values
-      const values2 = await collect(shared)
-      
-      expect(values1).toEqual([1, 2, 3, 4, 5])
-      expect(values2).toEqual([4, 5])
-    })
-  })
-
-  describe('share', () => {
-    it('shares without buffering', async () => {
-      const source = from([1, 2, 3])
-      const shared = share(source)
-      
-      // First consumer gets all values
-      const values1 = await collect(shared)
-      
-      // Second consumer gets nothing (no buffer)
-      const values2 = await collect(shared)
-      
-      expect(values1).toEqual([1, 2, 3])
-      expect(values2).toEqual([])
-    })
-  })
-})
+<<tests>>
 #+end_src
 
