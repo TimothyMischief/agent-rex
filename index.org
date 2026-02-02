@@ -678,7 +678,7 @@ describe('from', () => {
 
 *** Rust Implementation
 
-Rust uses =futures::futures::stream::iter= for sync iterables and =async_stream= for async:
+Rust uses =futures::stream::iter= for sync iterables and =async_stream= for async:
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Creates a stream from an iterator.
@@ -963,10 +963,7 @@ describe('never', () => {
 #+begin_src rust :tangle rust/src/lib.rs
 /// Creates a stream that never emits any values and never completes.
 pub fn never<T>() -> impl Stream<Item = T> {
-  async_stream::stream! {
-    pending::<()>().await;
-    // Never reached - the pending future never resolves
-  }
+  futures::stream::pending()
 }
 #+end_src
 
@@ -1194,14 +1191,18 @@ pub struct UnfoldResult<T, S> {
 /// Creates a stream by unfolding a seed value.
 pub fn unfold<T, S: Clone, F>(seed: S, f: F) -> impl Stream<Item = T>
 where
-  F: Fn(S) -> UnfoldResult<T, S> + Clone,
+  F: Fn(S) -> UnfoldResult<T, S> + Clone + Send + 'static,
 {
-  futures::stream::unfold(seed, move |state| async move {
-    let result = f(state);
-    if result.done {
-      None
-    } else {
-      Some((result.value, result.next_seed))
+  let f = f.clone();
+  futures::stream::unfold(seed, move |state| {
+    let f = f.clone();
+    async move {
+      let result = f(state);
+      if result.done {
+        None
+      } else {
+        Some((result.value, result.next_seed))
+      }
     }
   })
 }
@@ -1903,7 +1904,7 @@ mod map_tests {
   #[tokio::test]
   async fn test_map_transforms_values() {
     let source = futures::stream::iter(vec![1, 2, 3]);
-    let result = map(|x| x * 2, source);
+    let result = map(source, |x| x * 2);
     let values: Vec<_> = result.collect().await;
     assert_eq!(values, vec![2, 4, 6]);
   }
@@ -1911,7 +1912,7 @@ mod map_tests {
   #[tokio::test]
   async fn test_map_with_type_change() {
     let source = futures::stream::iter(vec![1, 2, 3]);
-    let result = map(|x| format!("num-{}", x), source);
+    let result = map(source, |x| format!("num-{}", x));
     let values: Vec<_> = result.collect().await;
     assert_eq!(values, vec!["num-1", "num-2", "num-3"]);
   }
@@ -1919,7 +1920,7 @@ mod map_tests {
   #[tokio::test]
   async fn test_map_empty_stream() {
     let source = stream::empty::<i32>();
-    let result = map(|x| x * 2, source);
+    let result = map(source, |x| x * 2);
     let values: Vec<_> = result.collect().await;
     assert!(values.is_empty());
   }
@@ -4141,88 +4142,61 @@ describe('debounce', () => {
 #+begin_src rust :tangle rust/src/lib.rs
 /// Only emit a value if no new values arrive within the specified duration.
 /// Uses the Runtime trait for timer functionality.
-pub fn debounce<R, T, S>(ms: u64, mut s: S) -> impl Stream<Item = T>
+pub fn debounce<R, T, S>(ms: u64, s: S) -> impl Stream<Item = T>
 where
   R: Runtime,
-  T: Clone,
-  S: Stream<Item = T> + Unpin,
+  T: Clone + Send + 'static,
+  S: Stream<Item = T> + Send + 'static,
 {
-  stream! {
-    let duration = Duration::from_millis(ms);
-    let mut pending: Option<T> = None;
-    let mut timer: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> = None;
-    loop {
-      futures::select! {
-        item = s.next() => {
-          match item {
-            Some(value) => {
-              pending = Some(value);
-              timer = Some(R::sleep(duration));
-            }
-            None => {
-              // Stream ended, emit any pending value
-              if let Some(value) = pending.take() {  yield value; }
-              break;
-            }
-          }
-        }
-        _ = async {
-          if let Some(ref mut t) = timer {  t.await; }
-          else {  std::future::pending::<()>().await; }
-        }.fuse() => {
-          if let Some(value) = pending.take() { yield value; }
-          timer = None;
-        }
-      }
-    }
-  }
+  debounce_with(ms, s, R::sleep)
 }
 
-/// Runtime-agnostic debounce that accepts a sleep function
-pub fn debounce_with<T, S, F, Fut>(
-  ms: u64,
-  mut s: S,
-  sleep_fn: F,
-) -> impl Stream<Item = T>
+/// Runtime-agnostic debounce that accepts a sleep function.
+/// Emits a value only after the specified duration has passed without new values.
+pub fn debounce_with<T, S, F, Fut>(ms: u64, s: S, sleep_fn: F) -> impl Stream<Item = T>
 where
-  T: Clone,
-  S: Stream<Item = T> + Unpin,
-  F: Fn(Duration) -> Fut + Clone,
-  Fut: std::future::Future<Output = ()> + Unpin,
+  T: Clone + Send + 'static,
+  S: Stream<Item = T> + Send + 'static,
+  F: Fn(Duration) -> Fut + Clone + Send + 'static,
+  Fut: std::future::Future<Output = ()> + Send + 'static,
 {
   stream! {
     let duration = Duration::from_millis(ms);
     let mut pending: Option<T> = None;
-    let mut timer: Option<Fut> = None;
-    loop {
-      // Manual select implementation for flexibility
-      if let Some(ref mut t) = timer {
-        futures::select! {
-          item = s.next() => {
-            match item {
-              Some(value) => {
-                pending = Some(value);
-                timer = Some(sleep_fn(duration));
-              }
-              None => {
-                if let Some(value) = pending.take() { yield value; }
-                break;
-              }
-            }
+    
+    futures::pin_mut!(s);
+    
+    while let Some(value) = s.next().await {
+      pending = Some(value);
+      // Keep consuming while values arrive rapidly
+      loop {
+        let timeout = sleep_fn(duration);
+        futures::pin_mut!(timeout);
+        
+        // Race between next value and timeout
+        let next = s.next();
+        futures::pin_mut!(next);
+        
+        match futures::future::select(next, timeout).await {
+          futures::future::Either::Left((Some(v), _)) => {
+            // New value arrived, update pending and restart timer
+            pending = Some(v);
           }
-          _ = t => {
-              if let Some(value) = pending.take() { yield value; }
-              timer = None;
+          futures::future::Either::Left((None, _)) => {
+            // Stream ended
+            if let Some(v) = pending.take() {
+              yield v;
+            }
+            return;
+          }
+          futures::future::Either::Right((_, _)) => {
+            // Timeout fired, emit pending and wait for next value
+            if let Some(v) = pending.take() {
+              yield v;
+            }
+            break;
           }
         }
-      } else {
-          match s.next().await {
-              Some(value) => {
-                  pending = Some(value);
-                  timer = Some(sleep_fn(duration));
-              }
-              None => break,
-          }
       }
     }
   }
@@ -4426,6 +4400,15 @@ impl Default for ThrottleOptions {
   }
 }
 
+impl ThrottleOptions {
+  pub fn leading_only() -> Self {
+    Self { leading: true, trailing: false }
+  }
+  pub fn trailing_only() -> Self {
+    Self { leading: false, trailing: true }
+  }
+}
+
 /// Limit emission rate with leading/trailing edge control.
 /// This implementation is runtime-agnostic - it only uses std::time::Instant.
 pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
@@ -4453,7 +4436,9 @@ pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
       }
     }
     // Emit final trailing value
-    if options.trailing && let Some(value) = trailing_value { yield value; }
+    if options.trailing {
+      if let Some(value) = trailing_value { yield value; }
+    }
   }
 }
 #+end_src
@@ -4661,11 +4646,22 @@ where
 #[cfg(test)]
 mod recover_with_tests {
   use super::*;
+  
+  // Use a concrete error type for testing
+  #[derive(Debug)]
+  struct SimpleError;
+  impl std::fmt::Display for SimpleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      write!(f, "SimpleError")
+    }
+  }
+  impl std::error::Error for SimpleError {}
+  
   #[tokio::test]
   async fn test_recover_with_no_error() {
-    let source = futures::stream::iter(vec![Ok(1), Ok(2), Ok(3)]);
+    let source = futures::stream::iter(vec![Ok::<_, SimpleError>(1), Ok(2), Ok(3)]);
     let values: Vec<_> = recover_with(
-      |_e: Error| futures::stream::iter(vec![99]),
+      |_e: SimpleError| futures::stream::iter(vec![99]),
       source,
     ).collect().await;
     assert_eq!(values, vec![1, 2, 3]);
@@ -4675,11 +4671,11 @@ mod recover_with_tests {
   async fn test_recover_with_error() {
     let source = futures::stream::iter(vec![
       Ok(1),
-      Err(Error::new(ErrorKind::Other, "test error")),
+      Err(SimpleError),
       Ok(3),
     ]);
     let values: Vec<_> = recover_with(
-      |_e: Error| futures::stream::iter(vec![99, 100]),
+      |_e: SimpleError| futures::stream::iter(vec![99, 100]),
       source,
     ).collect().await;
     assert_eq!(values, vec![1, 99, 100]);
@@ -4762,10 +4758,13 @@ pub fn throw_error<T, E: Clone>(error: E) -> impl Stream<Item = Result<T, E>> {
 }
 
 // For panicking (not recommended for production):
-use async_stream::stream;
-
 pub fn throw_panic<T>(message: &'static str) -> impl Stream<Item = T> {
-  stream! { panic!("{}", message); }
+  stream! {
+    panic!("{}", message);
+    // Unreachable, but helps type inference:
+    #[allow(unreachable_code)]
+    loop { yield unreachable!(); }
+  }
 }
 #+end_src
 
@@ -5024,16 +5023,21 @@ where
 #[cfg(test)]
 mod retry_tests {
   use super::*;
+  
+  // Simple clone-able error for testing
+  #[derive(Debug, Clone, PartialEq)]
+  struct TestError(String);
+  
   #[tokio::test]
   async fn test_retry_with_success() {
-  let values: Vec<_> = retry_with(
-    3,
-    10,
-    || futures::stream::iter(vec![Ok(1), Ok(2), Ok(3)]),
-    |_d| std::future::ready(()),
-  ).collect().await;
-  let ok_values: Vec<_> = values.into_iter().filter_map(|r| r.ok()).collect();
-  assert_eq!(ok_values, vec![1, 2, 3]);
+    let values: Vec<Result<i32, TestError>> = retry_with(
+      3,
+      10,
+      || futures::stream::iter(vec![Ok(1), Ok(2), Ok(3)]),
+      |_d| std::future::ready(()),
+    ).collect().await;
+    let ok_values: Vec<_> = values.into_iter().filter_map(|r| r.ok()).collect();
+    assert_eq!(ok_values, vec![1, 2, 3]);
   }
 
   #[tokio::test]
@@ -5042,12 +5046,12 @@ mod retry_tests {
     use std::sync::Arc;
     let attempt = Arc::new(AtomicUsize::new(0));
     let attempt_clone = attempt.clone();
-    let values: Vec<_> = retry_with(
+    let values: Vec<Result<i32, TestError>> = retry_with(
       3,
       0,
       move || {
         let n = attempt_clone.fetch_add(1, Ordering::SeqCst);
-        if n < 2 { futures::stream::iter(vec![Err(Error::new(ErrorKind::Other, "fail"))]) }
+        if n < 2 { futures::stream::iter(vec![Err(TestError("fail".into()))]) }
         else { futures::stream::iter(vec![Ok(42)]) }
       },
       |_d| std::future::ready(()),
@@ -5384,8 +5388,6 @@ describe('mergeAll', () => {
 =StreamExt::flatten_unordered= provides concurrent flattening:
 
 #+begin_src rust :tangle rust/src/lib.rs
-use futures::{Stream, StreamExt};
-
 // Built-in: outer.flatten_unordered(None) // None = unlimited concurrency
 // Or: outer.flatten_unordered(Some(10))  // limit to 10 concurrent streams
 
@@ -5510,8 +5512,6 @@ describe('chain / flatMap', () => {
 // stream.flat_map(|item| create_inner_stream(item))
 
 // Custom implementation:
-use async_stream::stream;
-
 pub fn flat_map<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
 where
   S: Stream<Item = T>,
@@ -5843,39 +5843,40 @@ Using =futures::select!= for runtime-agnostic stream combination:
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Combine two streams, emitting tuple of latest values.
-/// Runtime-agnostic using futures::select!
-pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item = U> + Unpin>(
-  mut s1: S1,
-  mut s2: S2,
+/// Runtime-agnostic using stream merging.
+pub fn latest2<T: Clone + Send + 'static, U: Clone + Send + 'static>(
+  s1: impl Stream<Item = T> + Send + 'static,
+  s2: impl Stream<Item = U> + Send + 'static,
 ) -> impl Stream<Item = (T, U)> {
+  // Tag values with which stream they came from
+  enum Either<A, B> { Left(A), Right(B) }
+  
+  // Box the mapped streams to make them Unpin
+  let tagged1: Pin<Box<dyn Stream<Item = Either<T, U>> + Send>> = 
+    Box::pin(s1.map(Either::Left));
+  let tagged2: Pin<Box<dyn Stream<Item = Either<T, U>> + Send>> = 
+    Box::pin(s2.map(Either::Right));
+  
   stream! {
     let mut latest1: Option<T> = None;
     let mut latest2: Option<U> = None;
-    let mut s1_done = false;
-    let mut s2_done = false;
-    loop {
-      if s1_done && s2_done {  break; }
-      
-      futures::select! {
-        item = s1.next().fuse(), if !s1_done => {
-          match item {
-            Some(v) => {
-              latest1 = Some(v);
-              if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) { yield (a.clone(), b.clone()); }
-            }
-            None => s1_done = true,
+    
+    let mut merged = futures::stream::select(tagged1, tagged2);
+    
+    while let Some(item) = merged.next().await {
+      match item {
+        Either::Left(v) => {
+          latest1 = Some(v);
+          if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) {
+            yield (a.clone(), b.clone());
           }
         }
-        item = s2.next().fuse(), if !s2_done => {
-          match item {
-            Some(v) => {
-              latest2 = Some(v);
-              if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) {  yield (a.clone(), b.clone()); }
-            }
-            None => s2_done = true,
+        Either::Right(v) => {
+          latest2 = Some(v);
+          if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) {
+            yield (a.clone(), b.clone());
           }
         }
-        complete => break,
       }
     }
   }
@@ -5955,10 +5956,11 @@ describe('applyLatest', () => {
 /// Apply latest function to latest value.
 pub fn apply_latest<T, U, F, S1, S2>(fn_stream: S1, value_stream: S2) -> impl Stream<Item = U>
 where
-  S1: Stream<Item = F> + Unpin,
-  S2: Stream<Item = T> + Unpin,
-  F: Fn(T) -> U + Clone,
-  T: Clone,
+  S1: Stream<Item = F> + Send + 'static,
+  S2: Stream<Item = T> + Send + 'static,
+  F: Fn(T) -> U + Clone + Send + 'static,
+  T: Clone + Send + 'static,
+  U: Send + 'static,
 {
   latest2(fn_stream, value_stream).map(|(f, v)| f(v))
 }
@@ -6329,7 +6331,7 @@ pub fn buffer<T, S: Stream<Item = T>>(size: usize, s: S) -> impl Stream<Item = V
 
 #+begin_src rust :tangle rust/src/lib.rs
 #[cfg(test)]
-mod tests {
+mod buffer_tests {
   use super::*;
   #[tokio::test]
   async fn test_buffer() {
@@ -6701,34 +6703,27 @@ Windowing in Rust typically uses channels to create sub-streams:
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Split source into windows of specified size.
-/// Each window is a separate stream.
-pub fn window<T: Send + 'static, S: Stream<Item = T> + Unpin>(
+/// Each window is a vector of items (simpler than sub-streams).
+pub fn window<T: Clone + Send + 'static>(
   size: usize,
-  mut s: S,
-) -> impl Stream<Item = impl Stream<Item = T>> {
+  s: impl Stream<Item = T> + Send + 'static,
+) -> impl Stream<Item = Vec<T>> {
   stream! {
+    futures::pin_mut!(s);
     loop {
-      let (tx, rx) = mpsc::channel::<T>(size);
-      let mut count = 0;
-      let mut done = false;
-      // Yield the receiver as a stream before filling
-      let window_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-      yield window_stream;
-      // Fill the window
-      while count < size {
+      let mut window = Vec::with_capacity(size);
+      while window.len() < size {
         match s.next().await {
-          Some(item) => {
-            let _ = tx.send(item).await;
-            count += 1;
-          }
+          Some(item) => window.push(item),
           None => {
-            done = true;
-            break;
+            if !window.is_empty() {
+              yield window;
+            }
+            return;
           }
         }
       }
-      drop(tx);  // Close the channel
-      if done { break; }
+      yield window;
     }
   }
 }
@@ -7282,15 +7277,20 @@ impl<T: Clone + Send + 'static> ReplaySubject<T> {
     stream! {
       let (tx, mut rx) = mpsc::unbounded();
       let buffered: Vec<T>;
+      let was_completed: bool;
       
       {
         let mut guard = inner.lock().await;
         buffered = guard.buffer.clone();
+        was_completed = guard.completed;
         if !guard.completed { guard.subscribers.push(tx); }
       }
       
       // Replay buffered values first
       for item in buffered { yield item; }
+      
+      // If already completed, don't wait for more values
+      if was_completed { return; }
       
       // Then receive live values
       while let Some(item) = rx.next().await { yield item; }
@@ -7515,7 +7515,7 @@ impl<T: Clone + Send + 'static> Replay<T> {
       for value in buffered { yield value; }
       
       // Receive live values
-      while let Some(result) = rx.recv().await {
+      while let Some(result) = rx.next().await {
         match result {
           Ok(value) => yield value,
           Err(_) => break,
@@ -7538,7 +7538,7 @@ impl<T: Clone + Send + 'static> Replay<T> {
         }
         
         // Broadcast to subscribers
-        guard.subscribers.retain(|tx| tx.send(Ok(value.clone())).is_ok());
+        guard.subscribers.retain(|tx| tx.unbounded_send(Ok(value.clone())).is_ok());
     }
     
     // Mark complete
@@ -7570,7 +7570,7 @@ where
 
 #+begin_src rust :tangle rust/src/lib.rs
 #[cfg(test)]
-mod tests {
+mod replay_tests {
   use super::*;
 
   #[tokio::test]
@@ -7806,7 +7806,7 @@ where
             let mut guard = state_clone.lock().await;
             guard.buffer.push(value.clone());
             if guard.buffer.len() > guard.buffer_size { guard.buffer.remove(0); }
-            guard.subscribers.retain(|tx| tx.send(value.clone()).is_ok());
+            guard.subscribers.retain(|tx| tx.unbounded_send(value.clone()).is_ok());
           }
           state_clone.lock().await.completed = true;
         }
@@ -7966,8 +7966,9 @@ where
 
 // Example usage
 async fn replay_stream_example() {
-  let source = futures::futures::stream::iter(vec![1, 2, 3]);
-  let mut copies = replay_stream(usize::MAX, source);
+  let source = futures::stream::iter(vec![1, 2, 3]);
+  let copies = replay_stream(usize::MAX, source);
+  futures::pin_mut!(copies);
   
   // Get first copy
   if let Some(copy) = copies.next().await {
@@ -8279,12 +8280,11 @@ This block tangles first to establish imports and core types.
 
 // Core imports - defined once at the top
 use std::error::Error;
-use std::future::Future;
-use std::io::ErrorKind;
+use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt, FutureExt};
