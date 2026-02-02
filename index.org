@@ -107,6 +107,268 @@ The =value= property of this object contains the yielded value from the generato
 This mechanism allows async generators to produce values asynchronously, making them well-suited for representing streams of data that may arrive over time.
 They are also lazy, meaning that values are only produced when requested, which can help with performance and resource management.
 
+** Rust: Async Streams and Runtime Independence
+
+Rust takes a different approach to async than JavaScript. In JavaScript, the runtime (the browser or Node.js) provides async facilities like timers and I/O automatically. In Rust, async is *runtime-agnostic* — the language provides the primitives (=Future=, =async/await=), but you choose the executor that runs your async code.
+
+*** Futures and Streams in Rust
+
+A =Future= in Rust is analogous to a JavaScript =Promise= — it represents a value that will be available later:
+
+#+begin_src rust :tangle no
+// JavaScript Promise
+const promise: Promise<number> = fetchData();
+const value = await promise;
+
+// Rust Future
+let future: impl Future<Output = i32> = fetch_data();
+let value = future.await;
+#+end_src
+
+A =Stream= in Rust is the async iterator equivalent — it yields multiple values over time:
+
+#+begin_src rust :tangle no
+// JavaScript AsyncIterator
+for await (const value of asyncIterator) {
+  console.log(value);
+}
+
+// Rust Stream (using futures crate)
+use futures::StreamExt;
+while let Some(value) = stream.next().await {
+    println!("{}", value);
+}
+#+end_src
+
+The =Stream= trait from the =futures= crate is defined as:
+
+#+begin_src rust :tangle no
+pub trait Stream {
+    type Item;
+    
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>>;
+}
+#+end_src
+
+While you can implement =Stream= manually, the =async-stream= crate provides a convenient macro:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+
+fn my_stream() -> impl Stream<Item = i32> {
+    stream! {
+        for i in 0..3 {
+            yield i;
+        }
+    }
+}
+#+end_src
+
+*** Why Runtime Independence?
+
+Different Rust async runtimes offer different tradeoffs:
+
+| Runtime | Strengths | Best For |
+|---------+-----------+----------|
+| *tokio* | Most popular, feature-rich, great ecosystem | Production servers, general async |
+| *async-std* | Mirrors std API, easy migration | Projects preferring familiar API |
+| *smol* | Tiny, minimal dependencies | Embedded, libraries, small binaries |
+
+Agent-Rex's Rust implementations are designed to work with *any* runtime by:
+
+1. Using the =futures= crate for runtime-agnostic Stream utilities
+2. Providing a =Runtime= trait for runtime-specific operations (timers, spawning)
+3. Including built-in implementations for common runtimes
+
+*** The Runtime Trait
+
+Some operations require runtime-specific features. We abstract these behind a trait:
+
+#+begin_src rust :tangle no
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+/// Runtime abstraction for async operations that need executor-specific features.
+/// 
+/// Most stream operations are runtime-agnostic and use only `futures` primitives.
+/// This trait is needed only for:
+/// - Time-based operations (delay, debounce, throttle)
+/// - Spawning background tasks (multicasting, eager evaluation)
+pub trait Runtime: Clone + Send + Sync + 'static {
+    /// Sleep for the given duration
+    fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    
+    /// Create an interval that yields at regular intervals
+    fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>>;
+    
+    /// Spawn a future as a background task
+    fn spawn<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static;
+}
+#+end_src
+
+*** Built-in Runtime Implementations
+
+#+begin_src rust :tangle no
+// Tokio runtime (most common)
+#[cfg(feature = "tokio-runtime")]
+#[derive(Clone)]
+pub struct TokioRuntime;
+
+#[cfg(feature = "tokio-runtime")]
+impl Runtime for TokioRuntime {
+    fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+    
+    fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+        use async_stream::stream;
+        Box::pin(stream! {
+            let mut interval = tokio::time::interval(period);
+            loop {
+                interval.tick().await;
+                yield ();
+            }
+        })
+    }
+    
+    fn spawn<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(future);
+    }
+}
+
+// Smol runtime (lightweight)
+#[cfg(feature = "smol-runtime")]
+#[derive(Clone)]
+pub struct SmolRuntime;
+
+#[cfg(feature = "smol-runtime")]
+impl Runtime for SmolRuntime {
+    fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async_io::Timer::after(duration))
+    }
+    
+    fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+        use async_stream::stream;
+        Box::pin(stream! {
+            loop {
+                async_io::Timer::after(period).await;
+                yield ();
+            }
+        })
+    }
+    
+    fn spawn<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        smol::spawn(future).detach();
+    }
+}
+
+// async-std runtime
+#[cfg(feature = "async-std-runtime")]
+#[derive(Clone)]
+pub struct AsyncStdRuntime;
+
+#[cfg(feature = "async-std-runtime")]
+impl Runtime for AsyncStdRuntime {
+    fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async_std::task::sleep(duration))
+    }
+    
+    fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+        use async_stream::stream;
+        Box::pin(stream! {
+            loop {
+                async_std::task::sleep(period).await;
+                yield ();
+            }
+        })
+    }
+    
+    fn spawn<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        async_std::task::spawn(future);
+    }
+}
+#+end_src
+
+*** Using the Library
+
+Most operations don't need a runtime — they work with pure =futures= primitives:
+
+#+begin_src rust :tangle no
+use futures::StreamExt;
+
+// These work with ANY runtime (or no runtime at all for testing)
+let stream = just(42);
+let doubled = map(stream, |x| x * 2);
+let filtered = filter(doubled, |x| *x > 10);
+let first_five = take(filtered, 5);
+
+// Consume with any executor
+while let Some(value) = first_five.next().await {
+    println!("{}", value);
+}
+#+end_src
+
+Only time-based and spawning operations need the runtime parameter:
+
+#+begin_src rust :tangle no
+// Time-based operations require a runtime
+let delayed = delay::<TokioRuntime, _, _>(stream, Duration::from_millis(100));
+let debounced = debounce::<TokioRuntime, _, _>(stream, Duration::from_millis(300));
+
+// Multicasting requires spawning
+let shared = replay::<TokioRuntime, _, _>(10, source);
+#+end_src
+
+*** Cargo Features
+
+Enable the runtime you need in =Cargo.toml=:
+
+#+begin_src toml :tangle no
+[dependencies]
+agent-rex = { version = "0.1", features = ["tokio-runtime"] }
+
+# Or for smol
+agent-rex = { version = "0.1", features = ["smol-runtime"] }
+
+# Or for async-std
+agent-rex = { version = "0.1", features = ["async-std-runtime"] }
+
+# For library authors: no runtime, users choose their own
+agent-rex = { version = "0.1", default-features = false }
+#+end_src
+
+*** Core Dependencies
+
+The Rust implementation uses these crates:
+
+#+begin_src toml :tangle no
+[dependencies]
+futures = "0.3"           # Runtime-agnostic Stream utilities
+async-stream = "0.3"      # Convenient stream! macro
+pin-project-lite = "0.2"  # Safe pin projections
+
+# Optional runtime-specific dependencies
+tokio = { version = "1", features = ["time", "sync", "rt"], optional = true }
+async-io = { version = "2", optional = true }      # For smol
+smol = { version = "2", optional = true }
+async-std = { version = "1", optional = true }
+#+end_src
+
 * Creating a Stream
 
 ** =just=
@@ -415,20 +677,42 @@ describe('periodic', () => {
 
 *** Rust Implementation
 
-Using tokio's interval for periodic emissions:
+Uses the Runtime trait for timer functionality:
 
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::Stream;
-use tokio::time::{interval, Duration};
+use std::time::Duration;
 
 /// Creates a stream that emits () at regular intervals.
-pub fn periodic(interval_ms: u64) -> impl Stream<Item = ()> {
+/// Uses the Runtime trait abstraction for timer support.
+pub fn periodic<R: Runtime>(interval_ms: u64) -> impl Stream<Item = ()> {
+    use futures::StreamExt;
+    
+    let interval_stream = R::interval(Duration::from_millis(interval_ms));
     stream! {
-        let mut interval = interval(Duration::from_millis(interval_ms));
+        futures::pin_mut!(interval_stream);
         loop {
+            interval_stream.next().await;
             yield ();
-            interval.tick().await;
+        }
+    }
+}
+
+// Runtime-agnostic alternative using async-io (works with smol, async-std)
+// or any timer that implements Future<Output = ()>
+pub fn periodic_with_timer<T, F>(
+    interval_ms: u64,
+    make_timer: impl Fn(Duration) -> F + Send + 'static,
+) -> impl Stream<Item = ()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    stream! {
+        let duration = Duration::from_millis(interval_ms);
+        loop {
+            make_timer(duration).await;
+            yield ();
         }
     }
 }
@@ -876,7 +1160,7 @@ use futures::{Stream, StreamExt};
 pub fn start_with<T: Clone, S: Stream<Item = T>>(value: T, s: S) -> impl Stream<Item = T> {
     stream! {
         yield value;
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             yield item;
         }
@@ -956,7 +1240,7 @@ use futures::{Stream, StreamExt};
 pub fn concat<T, S: Stream<Item = T>>(streams: Vec<S>) -> impl Stream<Item = T> {
     stream! {
         for s in streams {
-            tokio::pin!(s);
+            futures::pin_mut!(s);
             while let Some(item) = s.next().await {
                 yield item;
             }
@@ -967,8 +1251,8 @@ pub fn concat<T, S: Stream<Item = T>>(streams: Vec<S>) -> impl Stream<Item = T> 
 // For two streams specifically:
 pub fn concat2<T, S1: Stream<Item = T>, S2: Stream<Item = T>>(s1: S1, s2: S2) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s1);
-        tokio::pin!(s2);
+        futures::pin_mut!(s1);
+        futures::pin_mut!(s2);
         while let Some(item) = s1.next().await {
             yield item;
         }
@@ -1114,28 +1398,48 @@ describe('fromEvent', () => {
 
 *** Rust Implementation
 
-In Rust, we typically use channels (tokio::sync::mpsc) for event-driven patterns:
+In Rust, event-driven patterns use channels. We use =futures::channel= for runtime independence:
 
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::Stream;
-use tokio::sync::mpsc;
+use futures::channel::mpsc;
 
 /// Creates a stream from a channel receiver.
 /// The sender can be used to push events from event handlers.
-pub fn from_channel<T>(mut rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
+/// 
+/// This is runtime-agnostic and works with any async executor.
+pub fn from_channel<T>(mut rx: mpsc::UnboundedReceiver<T>) -> impl Stream<Item = T> {
+    use futures::StreamExt;
+    
     stream! {
-        while let Some(item) = rx.recv().await {
+        while let Some(item) = rx.next().await {
+            yield item;
+        }
+    }
+}
+
+/// Bounded variant for backpressure
+pub fn from_bounded_channel<T>(mut rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
+    use futures::StreamExt;
+    
+    stream! {
+        while let Some(item) = rx.next().await {
             yield item;
         }
     }
 }
 
 // Example usage for event-like patterns:
-// let (tx, rx) = mpsc::channel(100);
+// let (tx, rx) = mpsc::unbounded();
 // let event_stream = from_channel(rx);
 // 
-// // In an event handler:
+// // In an event handler (can be sync since unbounded):
+// tx.unbounded_send(event).unwrap();
+//
+// // Or with bounded channel for backpressure:
+// let (mut tx, rx) = mpsc::channel(100);
+// let event_stream = from_bounded_channel(rx);
 // tx.send(event).await.unwrap();
 #+end_src
 
@@ -1394,7 +1698,7 @@ where
     F: Fn(T) -> U,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             yield f(item);
         }
@@ -1492,7 +1796,7 @@ use async_stream::stream;
 
 pub fn constant<T, U: Clone, S: Stream<Item = T>>(value: U, s: S) -> impl Stream<Item = U> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(_) = s.next().await {
             yield value.clone();
         }
@@ -1612,7 +1916,7 @@ where
     stream! {
         let mut acc = seed.clone();
         yield acc.clone();
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             acc = accumulator(acc, item);
             yield acc.clone();
@@ -1721,14 +2025,14 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 
 /// Perform side effects for each value without modifying them.
-/// Note: In Rust, side effects are synchronous unless you use tokio::spawn.
+/// Runtime-agnostic - side effects are synchronous.
 pub fn tap<T: Clone, S, F>(side_effect: F, s: S) -> impl Stream<Item = T>
 where
     S: Stream<Item = T>,
     F: Fn(&T),
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             side_effect(&item);
             yield item;
@@ -1736,22 +2040,24 @@ where
     }
 }
 
-// For fire-and-forget async side effects:
-pub fn tap_spawn<T: Clone + Send + 'static, S, F, Fut>(
+/// For fire-and-forget async side effects using the Runtime trait.
+pub fn tap_spawn<R, T, S, F, Fut>(
     side_effect: F,
     s: S,
 ) -> impl Stream<Item = T>
 where
+    R: Runtime,
+    T: Clone + Send + 'static,
     S: Stream<Item = T>,
     F: Fn(T) -> Fut + Clone + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             let f = side_effect.clone();
             let item_clone = item.clone();
-            tokio::spawn(async move { f(item_clone).await });
+            R::spawn(async move { f(item_clone).await });
             yield item;
         }
     }
@@ -1855,7 +2161,7 @@ where
     Fut: Future<Output = ()>,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             side_effect(item.clone()).await;
             yield item;
@@ -1963,12 +2269,12 @@ where
     F: FnOnce() -> S2,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             yield item;
         }
         let s2 = f();
-        tokio::pin!(s2);
+        futures::pin_mut!(s2);
         while let Some(item) = s2.next().await {
             yield item;
         }
@@ -2060,9 +2366,9 @@ where
     Outer: Stream<Item = Inner>,
 {
     stream! {
-        tokio::pin!(outer);
+        futures::pin_mut!(outer);
         while let Some(inner) = outer.next().await {
-            tokio::pin!(inner);
+            futures::pin_mut!(inner);
             while let Some(item) = inner.next().await {
                 yield item;
             }
@@ -2183,10 +2489,10 @@ where
     F: Fn(T) -> Inner,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             let inner = f(item);
-            tokio::pin!(inner);
+            futures::pin_mut!(inner);
             while let Some(inner_item) = inner.next().await {
                 yield inner_item;
             }
@@ -2294,7 +2600,7 @@ where
     P: Fn(&T) -> bool,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             if predicate(&item) {
                 yield item;
@@ -2311,7 +2617,7 @@ where
     Fut: std::future::Future<Output = bool>,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             if predicate(&item).await {
                 yield item;
@@ -2412,7 +2718,7 @@ use futures::{Stream, StreamExt};
 /// Filter out consecutive duplicate values.
 pub fn skip_repeats<T: PartialEq + Clone, S: Stream<Item = T>>(s: S) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut last: Option<T> = None;
         while let Some(item) = s.next().await {
             let should_yield = match &last {
@@ -2530,7 +2836,7 @@ where
     F: Fn(&T, &T) -> bool,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut last: Option<T> = None;
         while let Some(item) = s.next().await {
             let should_yield = match &last {
@@ -2644,7 +2950,7 @@ use async_stream::stream;
 
 pub fn take<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut count = 0;
         while let Some(item) = s.next().await {
             if count < n {
@@ -2744,7 +3050,7 @@ use async_stream::stream;
 
 pub fn skip<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut count = 0;
         while let Some(item) = s.next().await {
             if count >= n {
@@ -2852,7 +3158,7 @@ use futures::{Stream, StreamExt};
 /// Emit values from index start to end (exclusive).
 pub fn slice<T, S: Stream<Item = T>>(start: usize, end: usize, s: S) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut index = 0;
         while let Some(item) = s.next().await {
             if index >= start && index < end {
@@ -2966,7 +3272,7 @@ where
     P: Fn(&T) -> bool,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             if predicate(&item) {
                 yield item;
@@ -3077,7 +3383,7 @@ where
     P: Fn(&T) -> bool,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut skipping = true;
         while let Some(item) = s.next().await {
             if skipping && !predicate(&item) {
@@ -3183,7 +3489,7 @@ where
     P: Fn(&T) -> bool,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         while let Some(item) = s.next().await {
             if predicate(&item) {
                 break;
@@ -3286,14 +3592,38 @@ describe('delay', () => {
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use tokio::time::{sleep, Duration};
+use std::time::Duration;
+use std::marker::PhantomData;
 
 /// Delay each value by a specified duration.
-pub fn delay<T, S: Stream<Item = T>>(ms: u64, s: S) -> impl Stream<Item = T> {
+/// Uses the Runtime trait for timer functionality.
+pub fn delay<R: Runtime, T, S: Stream<Item = T>>(ms: u64, s: S) -> impl Stream<Item = T> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
+        let duration = Duration::from_millis(ms);
         while let Some(item) = s.next().await {
-            sleep(Duration::from_millis(ms)).await;
+            R::sleep(duration).await;
+            yield item;
+        }
+    }
+}
+
+/// Runtime-agnostic delay that accepts a sleep function
+pub fn delay_with<T, S, F, Fut>(
+    ms: u64,
+    s: S,
+    sleep_fn: F,
+) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(Duration) -> Fut + Clone,
+    Fut: std::future::Future<Output = ()>,
+{
+    stream! {
+        futures::pin_mut!(s);
+        let duration = Duration::from_millis(ms);
+        while let Some(item) = s.next().await {
+            sleep_fn(duration).await;
             yield item;
         }
     }
@@ -3418,27 +3748,30 @@ describe('debounce', () => {
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use tokio::time::{sleep, Duration, Instant};
+use std::time::Duration;
 use std::pin::Pin;
-use futures::future::Fuse;
-use futures::FutureExt;
+use futures::future::FusedFuture;
 
 /// Only emit a value if no new values arrive within the specified duration.
-pub fn debounce<T: Clone, S: Stream<Item = T> + Unpin>(ms: u64, mut s: S) -> impl Stream<Item = T> {
+/// Uses the Runtime trait for timer functionality.
+pub fn debounce<R, T, S>(ms: u64, mut s: S) -> impl Stream<Item = T>
+where
+    R: Runtime,
+    T: Clone,
+    S: Stream<Item = T> + Unpin,
+{
     stream! {
         let duration = Duration::from_millis(ms);
         let mut pending: Option<T> = None;
-        let mut timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+        let mut timer: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>> = None;
 
         loop {
-            tokio::select! {
-                biased;
-
+            futures::select! {
                 item = s.next() => {
                     match item {
                         Some(value) => {
                             pending = Some(value);
-                            timer = Some(Box::pin(sleep(duration)));
+                            timer = Some(R::sleep(duration));
                         }
                         None => {
                             // Stream ended, emit any pending value
@@ -3455,11 +3788,66 @@ pub fn debounce<T: Clone, S: Stream<Item = T> + Unpin>(ms: u64, mut s: S) -> imp
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => {
+                }.fuse() => {
                     if let Some(value) = pending.take() {
                         yield value;
                     }
                     timer = None;
+                }
+            }
+        }
+    }
+}
+
+/// Runtime-agnostic debounce that accepts a sleep function
+pub fn debounce_with<T, S, F, Fut>(
+    ms: u64,
+    mut s: S,
+    sleep_fn: F,
+) -> impl Stream<Item = T>
+where
+    T: Clone,
+    S: Stream<Item = T> + Unpin,
+    F: Fn(Duration) -> Fut + Clone,
+    Fut: std::future::Future<Output = ()> + Unpin,
+{
+    stream! {
+        let duration = Duration::from_millis(ms);
+        let mut pending: Option<T> = None;
+        let mut timer: Option<Fut> = None;
+
+        loop {
+            // Manual select implementation for flexibility
+            if let Some(ref mut t) = timer {
+                futures::select! {
+                    item = s.next() => {
+                        match item {
+                            Some(value) => {
+                                pending = Some(value);
+                                timer = Some(sleep_fn(duration));
+                            }
+                            None => {
+                                if let Some(value) = pending.take() {
+                                    yield value;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = t => {
+                        if let Some(value) = pending.take() {
+                            yield value;
+                        }
+                        timer = None;
+                    }
+                }
+            } else {
+                match s.next().await {
+                    Some(value) => {
+                        pending = Some(value);
+                        timer = Some(sleep_fn(duration));
+                    }
+                    None => break,
                 }
             }
         }
@@ -3655,7 +4043,7 @@ describe('throttle', () => {
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use tokio::time::{Instant, Duration};
+use std::time::{Instant, Duration};
 
 pub struct ThrottleOptions {
     pub leading: bool,
@@ -3669,6 +4057,7 @@ impl Default for ThrottleOptions {
 }
 
 /// Limit emission rate with leading/trailing edge control.
+/// This implementation is runtime-agnostic - it only uses std::time::Instant.
 pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
     ms: u64,
     options: ThrottleOptions,
@@ -3842,13 +4231,13 @@ where
     E: Error,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         loop {
             match s.next().await {
                 Some(Ok(item)) => yield item,
                 Some(Err(e)) => {
                     let recovery = recover_fn(e);
-                    tokio::pin!(recovery);
+                    futures::pin_mut!(recovery);
                     while let Some(item) = recovery.next().await {
                         yield item;
                     }
@@ -4112,9 +4501,8 @@ describe('retry', () => {
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt, TryStreamExt};
-use tokio::time::{sleep, Duration};
-use std::error::Error;
+use futures::{Stream, StreamExt};
+use std::time::Duration;
 
 pub struct RetryOptions<F> {
     pub max_attempts: usize,
@@ -4123,12 +4511,14 @@ pub struct RetryOptions<F> {
 }
 
 /// Retry a stream factory on error.
-pub fn retry<T, E, S, F, SR>(
+/// Uses the Runtime trait for delay functionality.
+pub fn retry<R, T, E, S, F>(
     max_attempts: usize,
     delay_ms: u64,
     mut stream_factory: F,
 ) -> impl Stream<Item = Result<T, E>>
 where
+    R: Runtime,
     S: Stream<Item = Result<T, E>>,
     F: FnMut() -> S,
     E: Clone,
@@ -4137,7 +4527,7 @@ where
         let mut attempt = 0;
         loop {
             let s = stream_factory();
-            tokio::pin!(s);
+            futures::pin_mut!(s);
             let mut failed = false;
             
             while let Some(item) = s.next().await {
@@ -4150,7 +4540,7 @@ where
                             return;
                         }
                         if delay_ms > 0 {
-                            sleep(Duration::from_millis(delay_ms)).await;
+                            R::sleep(Duration::from_millis(delay_ms)).await;
                         }
                         failed = true;
                         break;
@@ -4160,6 +4550,52 @@ where
             
             if !failed {
                 return;  // Stream completed successfully
+            }
+        }
+    }
+}
+
+/// Runtime-agnostic retry with custom sleep function
+pub fn retry_with<T, E, S, F, SF, SFut>(
+    max_attempts: usize,
+    delay_ms: u64,
+    mut stream_factory: F,
+    sleep_fn: SF,
+) -> impl Stream<Item = Result<T, E>>
+where
+    S: Stream<Item = Result<T, E>>,
+    F: FnMut() -> S,
+    E: Clone,
+    SF: Fn(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    stream! {
+        let mut attempt = 0;
+        loop {
+            let s = stream_factory();
+            futures::pin_mut!(s);
+            let mut failed = false;
+            
+            while let Some(item) = s.next().await {
+                match item {
+                    Ok(value) => yield Ok(value),
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= max_attempts {
+                            yield Err(e);
+                            return;
+                        }
+                        if delay_ms > 0 {
+                            sleep_fn(Duration::from_millis(delay_ms)).await;
+                        }
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            
+            if !failed {
+                return;
             }
         }
     }
@@ -4369,54 +4805,62 @@ describe('merge', () => {
 
 *** Rust Implementation
 
-=futures::stream::select= and =futures::stream::select_all= provide merge functionality:
+The =futures= crate provides built-in merge functionality that is runtime-agnostic:
 
 #+begin_src rust :tangle no
 use futures::{Stream, StreamExt, stream};
+use async_stream::stream as async_stream;
 
-// For two streams:
-// stream::select(stream_a, stream_b)
+// Preferred: Use futures::stream::select for two streams (runtime-agnostic)
+pub fn merge<T, S1, S2>(s1: S1, s2: S2) -> impl Stream<Item = T>
+where
+    S1: Stream<Item = T>,
+    S2: Stream<Item = T>,
+{
+    stream::select(s1, s2)
+}
 
-// For multiple streams:
-// stream::select_all(vec![stream_a, stream_b, stream_c].into_iter())
+// For multiple streams, use select_all (runtime-agnostic)
+pub fn merge_all<T, S>(streams: Vec<S>) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    stream::select_all(streams)
+}
 
-// Custom implementation with tokio::select!:
-use async_stream::stream;
+// Custom implementation using futures::select! (runtime-agnostic)
 use futures::future::FusedFuture;
 use std::pin::Pin;
 
-pub fn merge<T, S1: Stream<Item = T> + Unpin, S2: Stream<Item = T> + Unpin>(
+pub fn merge_custom<T, S1: Stream<Item = T> + Unpin, S2: Stream<Item = T> + Unpin>(
     mut s1: S1,
     mut s2: S2,
 ) -> impl Stream<Item = T> {
-    stream! {
+    async_stream! {
+        use futures::FutureExt;
+        
+        let mut s1_done = false;
+        let mut s2_done = false;
+        
         loop {
-            tokio::select! {
-                biased;
-                item = s1.next() => {
+            if s1_done && s2_done {
+                break;
+            }
+            
+            futures::select! {
+                item = s1.next().fuse(), if !s1_done => {
                     match item {
                         Some(v) => yield v,
-                        None => {
-                            // s1 done, drain s2
-                            while let Some(v) = s2.next().await {
-                                yield v;
-                            }
-                            break;
-                        }
+                        None => s1_done = true,
                     }
                 }
-                item = s2.next() => {
+                item = s2.next().fuse(), if !s2_done => {
                     match item {
                         Some(v) => yield v,
-                        None => {
-                            // s2 done, drain s1
-                            while let Some(v) = s1.next().await {
-                                yield v;
-                            }
-                            break;
-                        }
+                        None => s2_done = true,
                     }
                 }
+                complete => break,
             }
         }
     }
@@ -4509,7 +4953,7 @@ use futures::{Stream, StreamExt};
 use async_stream::stream;
 use futures::stream::FuturesUnordered;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use futures::lock::Mutex;  // Runtime-agnostic
 
 pub fn merge_all<T, Inner, Outer>(outer: Outer) -> impl Stream<Item = T>
 where
@@ -4821,10 +5265,10 @@ describe('switchMap', () => {
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt};
-use tokio::sync::mpsc;
+use futures::{Stream, StreamExt, FutureExt};
 
 /// Switch to new inner stream on each outer value, cancelling previous.
+/// Runtime-agnostic using futures::select!
 pub fn switch_map<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
 where
     S: Stream<Item = T> + Unpin,
@@ -4832,15 +5276,13 @@ where
     F: Fn(T) -> Inner,
 {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut current_inner: Option<std::pin::Pin<Box<dyn Stream<Item = U> + Unpin>>> = None;
 
         loop {
-            tokio::select! {
-                biased;
-
+            futures::select! {
                 // Check outer stream first (higher priority for switching)
-                outer_item = s.next() => {
+                outer_item = s.next().fuse() => {
                     match outer_item {
                         Some(item) => {
                             // Cancel old inner by dropping, start new one
@@ -4865,7 +5307,7 @@ where
                     } else {
                         std::future::pending().await
                     }
-                } => {
+                }.fuse() => {
                     match inner_item {
                         Some(v) => yield v,
                         None => current_inner = None,
@@ -4978,13 +5420,14 @@ describe('latest', () => {
 
 *** Rust Implementation
 
-=tokio_stream::StreamExt::merge= with state tracking or =futures::stream::SelectAll= patterns:
+Using =futures::select!= for runtime-agnostic stream combination:
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, FutureExt};
 
 /// Combine two streams, emitting tuple of latest values.
+/// Runtime-agnostic using futures::select!
 pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item = U> + Unpin>(
     mut s1: S1,
     mut s2: S2,
@@ -4992,12 +5435,16 @@ pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item
     stream! {
         let mut latest1: Option<T> = None;
         let mut latest2: Option<U> = None;
+        let mut s1_done = false;
+        let mut s2_done = false;
 
         loop {
-            tokio::select! {
-                biased;
-
-                item = s1.next() => {
+            if s1_done && s2_done {
+                break;
+            }
+            
+            futures::select! {
+                item = s1.next().fuse(), if !s1_done => {
                     match item {
                         Some(v) => {
                             latest1 = Some(v);
@@ -5005,10 +5452,10 @@ pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item
                                 yield (a.clone(), b.clone());
                             }
                         }
-                        None => break,
+                        None => s1_done = true,
                     }
                 }
-                item = s2.next() => {
+                item = s2.next().fuse(), if !s2_done => {
                     match item {
                         Some(v) => {
                             latest2 = Some(v);
@@ -5016,9 +5463,10 @@ pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item
                                 yield (a.clone(), b.clone());
                             }
                         }
-                        None => break,
+                        None => s2_done = true,
                     }
                 }
+                complete => break,
             }
         }
     }
@@ -5200,24 +5648,23 @@ describe('untilStream', () => {
 
 *** Rust Implementation
 
-=StreamExt::take_until= provides this functionality:
+Using =futures::select!= for runtime-agnostic implementation:
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, FutureExt};
 
 /// Emit from source until stop stream emits.
+/// Runtime-agnostic using futures::select!
 pub fn until_stream<T, U, S: Stream<Item = T> + Unpin, Stop: Stream<Item = U> + Unpin>(
     mut stop: Stop,
     mut source: S,
 ) -> impl Stream<Item = T> {
     stream! {
         loop {
-            tokio::select! {
-                biased;
-
-                _ = stop.next() => break,
-                item = source.next() => {
+            futures::select! {
+                _ = stop.next().fuse() => break,
+                item = source.next().fuse() => {
                     match item {
                         Some(v) => yield v,
                         None => break,
@@ -5228,8 +5675,7 @@ pub fn until_stream<T, U, S: Stream<Item = T> + Unpin, Stop: Stream<Item = U> + 
     }
 }
 
-// Or use built-in:
-// use tokio_stream::StreamExt;
+// Alternative: Use futures::stream::StreamExt::take_until
 // source.take_until(stop.next())
 #+end_src
 
@@ -5329,9 +5775,10 @@ describe('sinceStream', () => {
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, FutureExt};
 
 /// Emit from source only after start stream emits.
+/// Runtime-agnostic using futures::select!
 pub fn since_stream<T, U, S: Stream<Item = T> + Unpin, Start: Stream<Item = U> + Unpin>(
     mut start: Start,
     mut source: S,
@@ -5340,20 +5787,18 @@ pub fn since_stream<T, U, S: Stream<Item = T> + Unpin, Start: Stream<Item = U> +
         let mut started = false;
 
         loop {
-            tokio::select! {
-                biased;
-
+            futures::select! {
                 _ = async {
                     if !started {
                         start.next().await
                     } else {
                         std::future::pending().await
                     }
-                } => {
+                }.fuse() => {
                     started = true;
                 }
 
-                item = source.next() => {
+                item = source.next().fuse() => {
                     match item {
                         Some(v) if started => yield v,
                         Some(_) => {}  // Drop values before start
@@ -5477,7 +5922,7 @@ use async_stream::stream;
 
 pub fn buffer<T, S: Stream<Item = T>>(size: usize, s: S) -> impl Stream<Item = Vec<T>> {
     stream! {
-        tokio::pin!(s);
+        futures::pin_mut!(s);
         let mut buf: Vec<T> = Vec::with_capacity(size);
         while let Some(item) = s.next().await {
             buf.push(item);
@@ -5621,27 +6066,71 @@ describe('bufferTime', () => {
 
 #+begin_src rust :tangle no
 use async_stream::stream;
-use futures::{Stream, StreamExt};
-use tokio::time::{interval, Duration, Instant};
+use futures::{Stream, StreamExt, FutureExt};
+use std::time::Duration;
 
 /// Buffer values over time windows.
-pub fn buffer_time<T, S: Stream<Item = T> + Unpin>(ms: u64, mut s: S) -> impl Stream<Item = Vec<T>> {
+/// Uses the Runtime trait for timer functionality.
+pub fn buffer_time<R, T, S>(ms: u64, mut s: S) -> impl Stream<Item = Vec<T>>
+where
+    R: Runtime,
+    T: Clone,
+    S: Stream<Item = T> + Unpin,
+{
     stream! {
         let duration = Duration::from_millis(ms);
         let mut buf: Vec<T> = Vec::new();
-        let mut timer = Box::pin(tokio::time::sleep(duration));
+        let mut timer = R::sleep(duration);
 
         loop {
-            tokio::select! {
-                biased;
-
-                _ = &mut timer => {
+            futures::select! {
+                _ = (&mut timer).fuse() => {
                     if !buf.is_empty() {
                         yield std::mem::take(&mut buf);
                     }
-                    timer = Box::pin(tokio::time::sleep(duration));
+                    timer = R::sleep(duration);
                 }
-                item = s.next() => {
+                item = s.next().fuse() => {
+                    match item {
+                        Some(v) => buf.push(v),
+                        None => {
+                            if !buf.is_empty() {
+                                yield buf;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Runtime-agnostic buffer_time with custom sleep function
+pub fn buffer_time_with<T, S, SF, SFut>(
+    ms: u64,
+    mut s: S,
+    sleep_fn: SF,
+) -> impl Stream<Item = Vec<T>>
+where
+    S: Stream<Item = T> + Unpin,
+    SF: Fn(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()> + Unpin,
+{
+    stream! {
+        let duration = Duration::from_millis(ms);
+        let mut buf: Vec<T> = Vec::new();
+        let mut timer = sleep_fn(duration);
+
+        loop {
+            futures::select! {
+                _ = (&mut timer).fuse() => {
+                    if !buf.is_empty() {
+                        yield std::mem::take(&mut buf);
+                    }
+                    timer = sleep_fn(duration);
+                }
+                item = s.next().fuse() => {
                     match item {
                         Some(v) => buf.push(v),
                         None => {
@@ -5815,7 +6304,7 @@ Windowing in Rust typically uses channels to create sub-streams:
 #+begin_src rust :tangle no
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use tokio::sync::mpsc;
+use futures::channel::mpsc;
 
 /// Split source into windows of specified size.
 /// Each window is a separate stream.
@@ -6126,17 +6615,21 @@ Pre-fetching in Rust is typically done with buffered channels or background task
 
 #+begin_src rust :tangle no
 use futures::{Stream, StreamExt};
-use tokio::sync::mpsc;
+use futures::channel::mpsc;
 use async_stream::stream;
 
 /// Pre-fetch values from a slow producer into a buffer.
-/// Starts lazily when first value is requested.
-pub fn eager<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
-    buffer_size: usize,
-    s: S,
-) -> impl Stream<Item = T> {
+/// Uses the Runtime trait for spawning background consumption.
+pub fn eager<R, T, S>(buffer_size: usize, s: S) -> impl Stream<Item = T>
+where
+    R: Runtime,
+    T: Send + 'static,
+    S: Stream<Item = T> + Send + Unpin + 'static,
+{
+    use futures::channel::mpsc;
+    
     // Use a channel as the buffer
-    let (tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
+    let (mut tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
     
     // Spawn background consumer on first pull
     let mut spawned = false;
@@ -6146,8 +6639,9 @@ pub fn eager<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
         if !spawned {
             spawned = true;
             let mut source = s.take().unwrap();
-            let tx = tx.clone();
-            tokio::spawn(async move {
+            R::spawn(async move {
+                use futures::StreamExt;
+                use futures::SinkExt;
                 while let Some(item) = source.next().await {
                     if tx.send(item).await.is_err() {
                         break;  // Receiver dropped
@@ -6155,24 +6649,30 @@ pub fn eager<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
                 }
             });
         }
-        drop(tx);  // Drop our copy so channel closes when task finishes
         
-        while let Some(item) = rx.recv().await {
+        use futures::StreamExt;
+        while let Some(item) = rx.next().await {
             yield item;
         }
     }
 }
 
-/// Pre-fetch values immediately on creation.
-pub fn eager_now<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
-    buffer_size: usize,
-    s: S,
-) -> impl Stream<Item = T> {
-    let (tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
+/// Pre-fetch values immediately on creation using the Runtime trait.
+pub fn eager_now<R, T, S>(buffer_size: usize, s: S) -> impl Stream<Item = T>
+where
+    R: Runtime,
+    T: Send + 'static,
+    S: Stream<Item = T> + Send + Unpin + 'static,
+{
+    use futures::channel::mpsc;
+    
+    let (mut tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
     
     // Start consuming immediately
     let mut source = s;
-    tokio::spawn(async move {
+    R::spawn(async move {
+        use futures::StreamExt;
+        use futures::SinkExt;
         while let Some(item) = source.next().await {
             if tx.send(item).await.is_err() {
                 break;
@@ -6181,7 +6681,8 @@ pub fn eager_now<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static
     });
     
     stream! {
-        while let Some(item) = rx.recv().await {
+        use futures::StreamExt;
+        while let Some(item) = rx.next().await {
             yield item;
         }
     }
@@ -6379,10 +6880,94 @@ describe('ReplaySubject', () => {
 
 *** Rust Implementation
 
-Rust's =tokio::sync::broadcast= provides similar multicasting capabilities:
+Runtime-agnostic implementation using =futures::channel= and =async-lock=:
 
 #+begin_src rust :tangle no
-use std::sync::{Arc, Mutex};\nuse tokio::sync::broadcast;\nuse futures::Stream;\nuse async_stream::stream;\n\n/// A multicasting subject that replays buffered values to new subscribers.\npub struct ReplaySubject<T: Clone + Send + 'static> {\n    buffer: Arc<Mutex<Vec<T>>>,\n    buffer_size: usize,\n    tx: broadcast::Sender<T>,\n}\n\nimpl<T: Clone + Send + 'static> ReplaySubject<T> {\n    pub fn new(buffer_size: usize) -> Self {\n        let (tx, _) = broadcast::channel(buffer_size.max(16));\n        Self {\n            buffer: Arc::new(Mutex::new(Vec::new())),\n            buffer_size,\n            tx,\n        }\n    }\n\n    pub fn next(&self, value: T) {\n        let mut buf = self.buffer.lock().unwrap();\n        buf.push(value.clone());\n        if buf.len() > self.buffer_size {\n            buf.remove(0);\n        }\n        let _ = self.tx.send(value);\n    }\n\n    pub fn subscribe(&self) -> impl Stream<Item = T> {\n        let buffer = self.buffer.lock().unwrap().clone();\n        let mut rx = self.tx.subscribe();\n        \n        stream! {\n            // Replay buffered values first\n            for item in buffer {\n                yield item;\n            }\n            // Then receive live values\n            while let Ok(item) = rx.recv().await {\n                yield item;\n            }\n        }\n    }\n}\n#+end_src
+use std::sync::Arc;
+use futures::lock::Mutex;  // Runtime-agnostic async Mutex
+use futures::channel::mpsc;
+use futures::Stream;
+use async_stream::stream;
+
+/// A multicasting subject that replays buffered values to new subscribers.
+/// Uses only runtime-agnostic primitives from the futures crate.
+pub struct ReplaySubject<T: Clone + Send + 'static> {
+    inner: Arc<Mutex<ReplaySubjectInner<T>>>,
+}
+
+struct ReplaySubjectInner<T> {
+    buffer: Vec<T>,
+    buffer_size: usize,
+    completed: bool,
+    error: Option<Arc<dyn std::error::Error + Send + Sync>>,
+    subscribers: Vec<mpsc::UnboundedSender<T>>,
+}
+
+impl<T: Clone + Send + 'static> ReplaySubject<T> {
+    pub fn new(buffer_size: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ReplaySubjectInner {
+                buffer: Vec::new(),
+                buffer_size,
+                completed: false,
+                error: None,
+                subscribers: Vec::new(),
+            })),
+        }
+    }
+
+    pub async fn next(&self, value: T) {
+        let mut inner = self.inner.lock().await;
+        inner.buffer.push(value.clone());
+        if inner.buffer.len() > inner.buffer_size {
+            inner.buffer.remove(0);
+        }
+        // Broadcast to all subscribers
+        inner.subscribers.retain(|tx| tx.unbounded_send(value.clone()).is_ok());
+    }
+
+    pub async fn complete(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.completed = true;
+        inner.subscribers.clear();
+    }
+
+    pub fn subscribe(&self) -> impl Stream<Item = T> {
+        let inner = self.inner.clone();
+        
+        stream! {
+            use futures::StreamExt;
+            
+            let (tx, mut rx) = mpsc::unbounded();
+            let buffered: Vec<T>;
+            
+            {
+                let mut guard = inner.lock().await;
+                buffered = guard.buffer.clone();
+                if !guard.completed {
+                    guard.subscribers.push(tx);
+                }
+            }
+            
+            // Replay buffered values first
+            for item in buffered {
+                yield item;
+            }
+            
+            // Then receive live values
+            while let Some(item) = rx.next().await {
+                yield item;
+            }
+        }
+    }
+}
+
+// Alternative: Use async-broadcast crate for true broadcast semantics
+// [dependencies]
+// async-broadcast = "0.6"
+//
+// use async_broadcast::{broadcast, Sender, Receiver};
+#+end_src
 
 ** =replay=
 
@@ -6509,7 +7094,7 @@ describe('replay', () => {
 
 #+begin_src rust :tangle no
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use futures::lock::Mutex;  // Runtime-agnostic
 
 /// Replay creates a shared stream that buffers values for late subscribers.
 struct Replay<T> {
@@ -6522,7 +7107,7 @@ struct ReplayInner<T> {
     completed: bool,
     error: Option<Arc<dyn std::error::Error + Send + Sync>>,
     source_started: bool,
-    subscribers: Vec<tokio::sync::mpsc::UnboundedSender<Result<T, Arc<dyn std::error::Error + Send + Sync>>>>,
+    subscribers: Vec<futures::channel::mpsc::UnboundedSender<Result<T, Arc<dyn std::error::Error + Send + Sync>>>>,
 }
 
 impl<T: Clone + Send + 'static> Replay<T> {
@@ -6546,7 +7131,7 @@ impl<T: Clone + Send + 'static> Replay<T> {
         let inner = self.inner.clone();
         
         async_stream::stream! {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = futures::channel::mpsc::unbounded_channel();
             
             // Get buffered values and register subscriber
             let buffered: Vec<T>;
@@ -6615,7 +7200,7 @@ where
     // Start source consumption on first subscribe
     async_stream::stream! {
         let stream = replay_clone.subscribe();
-        tokio::pin!(stream);
+        futures::pin_mut!(stream);
         while let Some(value) = stream.next().await {
             yield value;
         }
@@ -6700,7 +7285,7 @@ describe('share', () => {
 
 #+begin_src rust :tangle no
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use futures::lock::Mutex;  // Runtime-agnostic
 
 /// Share a stream among multiple consumers without buffering.
 /// This is equivalent to replay(0, source).
@@ -6721,7 +7306,7 @@ async fn share_example() {
     let shared = share(source);
     
     // First consumer gets values
-    tokio::pin!(shared);
+    futures::pin_mut!(shared);
     while let Some(value) = shared.next().await {
         println!("Got: {}", value);
     }
@@ -6815,7 +7400,7 @@ describe('replayFactory', () => {
 
 #+begin_src rust :tangle no
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use futures::lock::Mutex;  // Runtime-agnostic
 
 /// Creates a factory that produces independent copies of a buffered stream.
 /// Each call to the factory returns a fresh stream that replays buffered values.
@@ -6833,7 +7418,7 @@ where
         buffer: Vec<T>,
         buffer_size: usize,
         completed: bool,
-        subscribers: Vec<tokio::sync::mpsc::UnboundedSender<T>>,
+        subscribers: Vec<futures::channel::mpsc::UnboundedSender<T>>,
     }
     
     let state = Arc::new(Mutex::new(SharedState {
@@ -6855,22 +7440,23 @@ where
             if !started.swap(true, Ordering::SeqCst) {
                 let state_clone = state.clone();
                 if let Some(mut src) = source.lock().await.take() {
-                    tokio::spawn(async move {
-                        use futures::StreamExt;
-                        while let Some(value) = src.next().await {
-                            let mut guard = state_clone.lock().await;
-                            guard.buffer.push(value.clone());
-                            if guard.buffer.len() > guard.buffer_size {
-                                guard.buffer.remove(0);
-                            }
-                            guard.subscribers.retain(|tx| tx.send(value.clone()).is_ok());
+                    // Note: Spawning requires the Runtime trait
+                    // R::spawn(async move { ... });
+                    // For simplicity, consume source in current task
+                    use futures::StreamExt;
+                    while let Some(value) = src.next().await {
+                        let mut guard = state_clone.lock().await;
+                        guard.buffer.push(value.clone());
+                        if guard.buffer.len() > guard.buffer_size {
+                            guard.buffer.remove(0);
                         }
-                        state_clone.lock().await.completed = true;
-                    });
+                        guard.subscribers.retain(|tx| tx.send(value.clone()).is_ok());
+                    }
+                    state_clone.lock().await.completed = true;
                 }
             }
             
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = futures::channel::mpsc::unbounded();
             let buffered: Vec<T>;
             {
                 let mut guard = state.lock().await;
@@ -6884,7 +7470,84 @@ where
                 yield value;
             }
             
-            while let Some(value) = rx.recv().await {
+            use futures::StreamExt;
+            while let Some(value) = rx.next().await {
+                yield value;
+            }
+        }
+    }
+}
+
+/// Version that accepts a Runtime for spawning source consumption
+pub fn replay_factory_spawned<R, T, S>(
+    buffer_size: usize,
+    source: S,
+) -> impl Fn() -> impl futures::Stream<Item = T>
+where
+    R: Runtime,
+    T: Clone + Send + Sync + 'static,
+    S: futures::Stream<Item = T> + Send + Unpin + 'static,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use futures::lock::Mutex;
+    
+    struct SharedState<T> {
+        buffer: Vec<T>,
+        buffer_size: usize,
+        completed: bool,
+        subscribers: Vec<futures::channel::mpsc::UnboundedSender<T>>,
+    }
+    
+    let state = Arc::new(Mutex::new(SharedState {
+        buffer: Vec::new(),
+        buffer_size,
+        completed: false,
+        subscribers: Vec::new(),
+    }));
+    let started = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(Mutex::new(Some(source)));
+    
+    move || {
+        let state = state.clone();
+        let started = started.clone();
+        let source = source.clone();
+        
+        async_stream::stream! {
+            if !started.swap(true, Ordering::SeqCst) {
+                let state_clone = state.clone();
+                if let Some(src) = source.lock().await.take() {
+                    R::spawn(async move {
+                        use futures::StreamExt;
+                        futures::pin_mut!(src);
+                        while let Some(value) = src.next().await {
+                            let mut guard = state_clone.lock().await;
+                            guard.buffer.push(value.clone());
+                            if guard.buffer.len() > guard.buffer_size {
+                                guard.buffer.remove(0);
+                            }
+                            guard.subscribers.retain(|tx| tx.unbounded_send(value.clone()).is_ok());
+                        }
+                        state_clone.lock().await.completed = true;
+                    });
+                }
+            }
+            
+            let (tx, mut rx) = futures::channel::mpsc::unbounded();
+            let buffered: Vec<T>;
+            {
+                let mut guard = state.lock().await;
+                buffered = guard.buffer.clone();
+                if !guard.completed {
+                    guard.subscribers.push(tx);
+                }
+            }
+            
+            for value in buffered {
+                yield value;
+            }
+            
+            use futures::StreamExt;
+            while let Some(value) = rx.next().await {
                 yield value;
             }
         }
@@ -6944,7 +7607,7 @@ describe('replayStream', () => {
 
 #+begin_src rust :tangle no
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use futures::lock::Mutex;  // Runtime-agnostic
 
 /// Returns a stream that emits independent copies of the source stream.
 /// Each pull creates a new subscriber that receives buffered + live values.
@@ -6975,7 +7638,7 @@ async fn replay_stream_example() {
     
     // Get first copy
     if let Some(copy) = copies.next().await {
-        tokio::pin!(copy);
+        futures::pin_mut!(copy);
         let values: Vec<_> = copy.collect().await;
         println!("Copy values: {:?}", values);
     }
