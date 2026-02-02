@@ -165,6 +165,27 @@ describe('just', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+In Rust, we use =async_stream= for ergonomic async generators with tokio:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::Stream;
+
+/// Creates a stream that emits a single value and then completes.
+pub fn just<T: Clone>(value: T) -> impl Stream<Item = T> {
+    stream! {
+        yield value;
+    }
+}
+
+// Alias
+pub fn of<T: Clone>(value: T) -> impl Stream<Item = T> {
+    just(value)
+}
+#+end_src
+
 ** =fromPromise=
 The =fromPromise= function creates a stream from a Promise.
 When the Promise resolves, the stream emits the resolved value and then completes.
@@ -227,6 +248,24 @@ describe('fromPromise', () => {
     await expect(collect(fromPromise(failing))).rejects.toThrow('fail')
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+In Rust, futures are the equivalent of Promises:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Future, Stream};
+
+/// Creates a stream from a Future.
+/// When the Future resolves, the stream emits the value and completes.
+pub fn from_future<T, F: Future<Output = T>>(future: F) -> impl Stream<Item = T> {
+    stream! {
+        let value = future.await;
+        yield value;
+    }
+}
 #+end_src
 
 ** =from=
@@ -292,6 +331,25 @@ describe('from', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+Rust uses =futures::stream::iter= for sync iterables and =async_stream= for async:
+
+#+begin_src rust :tangle no
+use futures::stream::{self, Stream, StreamExt};
+use async_stream::stream;
+
+/// Creates a stream from an iterator.
+pub fn from_iter<T, I: IntoIterator<Item = T>>(iterable: I) -> impl Stream<Item = T> {
+    stream::iter(iterable)
+}
+
+/// Creates a stream from an async iterator (Stream).
+pub fn from_stream<T, S: Stream<Item = T>>(s: S) -> impl Stream<Item = T> {
+    s
+}
+#+end_src
+
 ** =periodic=
 The =periodic= function creates a stream that emits at regular intervals.
 To give it a value, combine it with =constant=.
@@ -355,6 +413,27 @@ describe('periodic', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+Using tokio's interval for periodic emissions:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::Stream;
+use tokio::time::{interval, Duration};
+
+/// Creates a stream that emits () at regular intervals.
+pub fn periodic(interval_ms: u64) -> impl Stream<Item = ()> {
+    stream! {
+        let mut interval = interval(Duration::from_millis(interval_ms));
+        loop {
+            yield ();
+            interval.tick().await;
+        }
+    }
+}
+#+end_src
+
 ** =empty=
 The =empty= function creates a stream that immediately completes without emitting any values.
 
@@ -408,6 +487,17 @@ describe('empty', () => {
     await expectStream(empty()).toBeEmpty()
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use futures::stream::{self, Stream};
+
+/// Creates a stream that immediately completes without emitting any values.
+pub fn empty<T>() -> impl Stream<Item = T> {
+    stream::empty()
+}
 #+end_src
 
 ** =never=
@@ -467,6 +557,21 @@ describe('never', () => {
     expect(result).toBe('timeout')
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use futures::stream::Stream;
+use std::future::pending;
+
+/// Creates a stream that never emits any values and never completes.
+pub fn never<T>() -> impl Stream<Item = T> {
+    async_stream::stream! {
+        pending::<()>().await;
+        // Never reached - the pending future never resolves
+    }
+}
 #+end_src
 
 ** =iterate=
@@ -538,6 +643,24 @@ describe('iterate', () => {
     expect(values).toEqual([10, 11, 12])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::Stream;
+
+/// Creates a stream that emits an infinite sequence by repeatedly applying a function.
+pub fn iterate<T: Clone, F: Fn(T) -> T>(seed: T, f: F) -> impl Stream<Item = T> {
+    stream! {
+        let mut current = seed;
+        loop {
+            yield current.clone();
+            current = f(current);
+        }
+    }
+}
 #+end_src
 
 ** =unfold=
@@ -637,6 +760,35 @@ describe('unfold', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+Rust's =futures::stream::unfold= provides this natively:
+
+#+begin_src rust :tangle no
+use futures::stream::{self, Stream};
+
+pub struct UnfoldResult<T, S> {
+    pub value: T,
+    pub next_seed: S,
+    pub done: bool,
+}
+
+/// Creates a stream by unfolding a seed value.
+pub fn unfold<T, S, F>(seed: S, f: F) -> impl Stream<Item = T>
+where
+    F: Fn(S) -> UnfoldResult<T, S>,
+{
+    stream::unfold(seed, move |state| async move {
+        let result = f(state);
+        if result.done {
+            None
+        } else {
+            Some((result.value, result.next_seed))
+        }
+    })
+}
+#+end_src
+
 ** =startWith=
 
 The =startWith= function prepends a value to the beginning of a stream.
@@ -714,6 +866,24 @@ describe('startWith', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Prepends a value to the beginning of a stream.
+pub fn start_with<T: Clone, S: Stream<Item = T>>(value: T, s: S) -> impl Stream<Item = T> {
+    stream! {
+        yield value;
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            yield item;
+        }
+    }
+}
+#+end_src
+
 ** =concat=
 
 The =concat= function concatenates multiple streams into a single stream.
@@ -774,6 +944,39 @@ describe('concat', () => {
     expect(result).toEqual([1, 2, 3, 4])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Concatenates multiple streams into a single stream.
+pub fn concat<T, S: Stream<Item = T>>(streams: Vec<S>) -> impl Stream<Item = T> {
+    stream! {
+        for s in streams {
+            tokio::pin!(s);
+            while let Some(item) = s.next().await {
+                yield item;
+            }
+        }
+    }
+}
+
+// For two streams specifically:
+pub fn concat2<T, S1: Stream<Item = T>, S2: Stream<Item = T>>(s1: S1, s2: S2) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s1);
+        tokio::pin!(s2);
+        while let Some(item) = s1.next().await {
+            yield item;
+        }
+        while let Some(item) = s2.next().await {
+            yield item;
+        }
+    }
+}
 #+end_src
 
 ** =fromEvent=
@@ -909,6 +1112,33 @@ describe('fromEvent', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+In Rust, we typically use channels (tokio::sync::mpsc) for event-driven patterns:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::Stream;
+use tokio::sync::mpsc;
+
+/// Creates a stream from a channel receiver.
+/// The sender can be used to push events from event handlers.
+pub fn from_channel<T>(mut rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
+    stream! {
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
+    }
+}
+
+// Example usage for event-like patterns:
+// let (tx, rx) = mpsc::channel(100);
+// let event_stream = from_channel(rx);
+// 
+// // In an event handler:
+// tx.send(event).await.unwrap();
+#+end_src
+
 * Composing with =pipe=
 
 All operators in Agent-Rex use a *data-last* signature: the stream is always the final argument.
@@ -999,6 +1229,37 @@ export function pipe(initial: unknown, ...fns: Fn[]): unknown {
   return fns.reduce((acc, fn) => fn(acc), initial)
 }
 
+#+end_src
+
+*** Rust Implementation
+
+In Rust, method chaining with trait extension patterns is idiomatic.
+The =StreamExt= trait from =futures= provides chainable methods on any Stream:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Rust uses method chaining instead of pipe:
+// let result = stream::iter([1, 2, 3, 4, 5])
+//     .filter(|x| futures::future::ready(x % 2 == 0))
+//     .map(|x| x * 10)
+//     .take(2);
+
+// For a pipe-like macro if desired:
+macro_rules! pipe {
+    ($initial:expr $(, $fn:expr)*) => {{
+        let mut result = $initial;
+        $(result = $fn(result);)*
+        result
+    }};
+}
+
+// Usage:
+// let stream = pipe!(
+//     stream::iter(vec![1, 2, 3]),
+//     |s| s.map(|x| x * 2),
+//     |s| s.take(2)
+// );
 #+end_src
 
 ** Currying Implementation Pattern
@@ -1111,6 +1372,36 @@ describe('map', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+The =StreamExt::map= method is built-in to futures:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+/// Map is built-in to StreamExt:
+/// stream.map(|x| x * 2)
+
+// For async mappers, use then():
+/// stream.then(|x| async move { x * 2 })
+
+// Custom implementation for reference:
+use async_stream::stream;
+
+pub fn map<T, U, S, F>(s: S, f: F) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    F: Fn(T) -> U,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            yield f(item);
+        }
+    }
+}
+#+end_src
+
 ** =constant=
 
 The =constant= function creates a stream that emits a constant value for each item in the source stream.
@@ -1186,6 +1477,27 @@ describe('constant', () => {
     expect(values).toEqual([])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+/// Map to a constant value.
+/// stream.map(|_| constant_value.clone())
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn constant<T, U: Clone, S: Stream<Item = T>>(value: U, s: S) -> impl Stream<Item = U> {
+    stream! {
+        tokio::pin!(s);
+        while let Some(_) = s.next().await {
+            yield value.clone();
+        }
+    }
+}
 #+end_src
 
 ** =scan=
@@ -1283,6 +1595,32 @@ describe('scan', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=StreamExt::scan= is available, but note it doesn't emit the seed first by default:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Scan with seed emission first (matching JS behavior).
+pub fn scan<T, U: Clone, S, F>(accumulator: F, seed: U, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    F: Fn(U, T) -> U,
+{
+    stream! {
+        let mut acc = seed.clone();
+        yield acc.clone();
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            acc = accumulator(acc, item);
+            yield acc.clone();
+        }
+    }
+}
+#+end_src
+
 ** =tap=
 
 The =tap= function allows you to perform side effects for each value emitted by a stream without modifying the values themselves.
@@ -1376,6 +1714,50 @@ describe('tap', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Perform side effects for each value without modifying them.
+/// Note: In Rust, side effects are synchronous unless you use tokio::spawn.
+pub fn tap<T: Clone, S, F>(side_effect: F, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(&T),
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            side_effect(&item);
+            yield item;
+        }
+    }
+}
+
+// For fire-and-forget async side effects:
+pub fn tap_spawn<T: Clone + Send + 'static, S, F, Fut>(
+    side_effect: F,
+    s: S,
+) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(T) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            let f = side_effect.clone();
+            let item_clone = item.clone();
+            tokio::spawn(async move { f(item_clone).await });
+            yield item;
+        }
+    }
+}
+#+end_src
+
 ** =awaitTap=
 
 The =awaitTap= function is like =tap=, but awaits the side effect before yielding the value.
@@ -1457,6 +1839,29 @@ describe('awaitTap', () => {
     expect(order).toEqual(['effect-1', 'effect-2', 'done'])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt, Future};
+
+/// Await side effects before yielding values.
+pub fn await_tap<T: Clone, S, F, Fut>(side_effect: F, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            side_effect(item.clone()).await;
+            yield item;
+        }
+    }
+}
 #+end_src
 
 ** =continueWith=
@@ -1544,6 +1949,33 @@ describe('continueWith', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Continue with another stream after the first completes.
+pub fn continue_with<T, S1, S2, F>(f: F, s: S1) -> impl Stream<Item = T>
+where
+    S1: Stream<Item = T>,
+    S2: Stream<Item = T>,
+    F: FnOnce() -> S2,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            yield item;
+        }
+        let s2 = f();
+        tokio::pin!(s2);
+        while let Some(item) = s2.next().await {
+            yield item;
+        }
+    }
+}
+#+end_src
+
 ** =concatAll=
 
 The =concatAll= function flattens a stream of streams by concatenating them into a single stream.
@@ -1608,6 +2040,35 @@ describe('concatAll', () => {
     expect(values).toEqual([])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::flatten= does exactly this:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Flatten a stream of streams by concatenating them.
+/// Built-in: stream_of_streams.flatten()
+
+// Custom implementation:
+pub fn concat_all<T, Inner, Outer>(outer: Outer) -> impl Stream<Item = T>
+where
+    Inner: Stream<Item = T>,
+    Outer: Stream<Item = Inner>,
+{
+    stream! {
+        tokio::pin!(outer);
+        while let Some(inner) = outer.next().await {
+            tokio::pin!(inner);
+            while let Some(item) = inner.next().await {
+                yield item;
+            }
+        }
+    }
+}
 #+end_src
 
 ** =concatMap=
@@ -1708,6 +2169,32 @@ describe('concatMap', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Map each value to a stream and concatenate results in order.
+pub fn concat_map<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    Inner: Stream<Item = U>,
+    F: Fn(T) -> Inner,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            let inner = f(item);
+            tokio::pin!(inner);
+            while let Some(inner_item) = inner.next().await {
+                yield inner_item;
+            }
+        }
+    }
+}
+#+end_src
+
 * Filtering
 
 ** =filter=
@@ -1789,6 +2276,51 @@ describe('filter', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=StreamExt::filter= is built-in:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.filter(|x| future::ready(x % 2 == 0))
+
+// Custom implementation for sync predicates:
+use async_stream::stream;
+
+pub fn filter<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item) {
+                yield item;
+            }
+        }
+    }
+}
+
+// For async predicates:
+pub fn filter_async<T, S, P, Fut>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item).await {
+                yield item;
+            }
+        }
+    }
+}
+#+end_src
+
 ** =skipRepeats=
 
 The =skipRepeats= function filters out consecutive duplicate values from a stream.
@@ -1867,6 +2399,33 @@ describe('skipRepeats', () => {
     expect(values).toEqual([42])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::dedup= doesn't exist by default; use =itertools= or custom:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Filter out consecutive duplicate values.
+pub fn skip_repeats<T: PartialEq + Clone, S: Stream<Item = T>>(s: S) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s);
+        let mut last: Option<T> = None;
+        while let Some(item) = s.next().await {
+            let should_yield = match &last {
+                None => true,
+                Some(prev) => item != *prev,
+            };
+            if should_yield {
+                last = Some(item.clone());
+                yield item;
+            }
+        }
+    }
+}
 #+end_src
 
 ** =skipRepeatsWith=
@@ -1958,6 +2517,35 @@ describe('skipRepeatsWith', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Filter consecutive duplicates using a custom equality function.
+pub fn skip_repeats_with<T: Clone, S, F>(equals: F, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(&T, &T) -> bool,
+{
+    stream! {
+        tokio::pin!(s);
+        let mut last: Option<T> = None;
+        while let Some(item) = s.next().await {
+            let should_yield = match &last {
+                None => true,
+                Some(prev) => !equals(&item, prev),
+            };
+            if should_yield {
+                last = Some(item.clone());
+                yield item;
+            }
+        }
+    }
+}
+#+end_src
+
 * Slicing
 
 ** =take=
@@ -2042,6 +2630,34 @@ describe('take', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=StreamExt::take= is built-in:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.take(n)
+
+// Custom implementation for reference:
+use async_stream::stream;
+
+pub fn take<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s);
+        let mut count = 0;
+        while let Some(item) = s.next().await {
+            if count < n {
+                yield item;
+                count += 1;
+            } else {
+                break;
+            }
+        }
+    }
+}
+#+end_src
+
 ** =skip=
 
 The =skip= function creates a stream that skips the first =n= values from the source stream and emits the rest.
@@ -2112,6 +2728,32 @@ describe('skip', () => {
     expect(result).toEqual([3, 4, 5])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::skip= is built-in:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.skip(n)
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn skip<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s);
+        let mut count = 0;
+        while let Some(item) = s.next().await {
+            if count >= n {
+                yield item;
+            }
+            count += 1;
+        }
+    }
+}
 #+end_src
 
 ** =slice=
@@ -2201,6 +2843,33 @@ describe('slice', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Emit values from index start to end (exclusive).
+pub fn slice<T, S: Stream<Item = T>>(start: usize, end: usize, s: S) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s);
+        let mut index = 0;
+        while let Some(item) = s.next().await {
+            if index >= start && index < end {
+                yield item;
+            }
+            index += 1;
+            if index >= end {
+                break;
+            }
+        }
+    }
+}
+
+// Or using built-in methods:
+// stream.skip(start).take(end - start)
+#+end_src
+
 ** =takeWhile=
 
 The =takeWhile= function creates a stream that emits values from the source stream as long as the provided predicate function returns true and ends the stream as soon as it returns false.
@@ -2277,6 +2946,36 @@ describe('takeWhile', () => {
     expect(values).toEqual(['a', 'b'])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::take_while= is built-in:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.take_while(|x| future::ready(*x < 4))
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn take_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item) {
+                yield item;
+            } else {
+                break;
+            }
+        }
+    }
+}
 #+end_src
 
 ** =skipWhile=
@@ -2360,6 +3059,38 @@ describe('skipWhile', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=StreamExt::skip_while= is built-in:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.skip_while(|x| future::ready(*x < 3))
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn skip_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        tokio::pin!(s);
+        let mut skipping = true;
+        while let Some(item) = s.next().await {
+            if skipping && !predicate(&item) {
+                skipping = false;
+            }
+            if !skipping {
+                yield item;
+            }
+        }
+    }
+}
+#+end_src
+
 ** =takeUntil=
 
 The =takeUntil= function creates a stream that emits values from the source stream until the provided predicate function returns true, at which point it completes (the matching value is *not* emitted).
@@ -2437,6 +3168,30 @@ describe('takeUntil', () => {
     expect(values).toEqual([1, 2, 3])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Take values until predicate matches (matching value not emitted).
+pub fn take_until<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item) {
+                break;
+            }
+            yield item;
+        }
+    }
+}
 #+end_src
 
 * Time-based Operators
@@ -2524,6 +3279,25 @@ describe('delay', () => {
     expect(values).toEqual([1, 2])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::time::{sleep, Duration};
+
+/// Delay each value by a specified duration.
+pub fn delay<T, S: Stream<Item = T>>(ms: u64, s: S) -> impl Stream<Item = T> {
+    stream! {
+        tokio::pin!(s);
+        while let Some(item) = s.next().await {
+            sleep(Duration::from_millis(ms)).await;
+            yield item;
+        }
+    }
+}
 #+end_src
 
 ** =debounce=
@@ -2637,6 +3411,60 @@ describe('debounce', () => {
     expect(values).toEqual([1])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::time::{sleep, Duration, Instant};
+use std::pin::Pin;
+use futures::future::Fuse;
+use futures::FutureExt;
+
+/// Only emit a value if no new values arrive within the specified duration.
+pub fn debounce<T: Clone, S: Stream<Item = T> + Unpin>(ms: u64, mut s: S) -> impl Stream<Item = T> {
+    stream! {
+        let duration = Duration::from_millis(ms);
+        let mut pending: Option<T> = None;
+        let mut timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                item = s.next() => {
+                    match item {
+                        Some(value) => {
+                            pending = Some(value);
+                            timer = Some(Box::pin(sleep(duration)));
+                        }
+                        None => {
+                            // Stream ended, emit any pending value
+                            if let Some(value) = pending.take() {
+                                yield value;
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ = async {
+                    if let Some(ref mut t) = timer {
+                        t.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if let Some(value) = pending.take() {
+                        yield value;
+                    }
+                    timer = None;
+                }
+            }
+        }
+    }
+}
 #+end_src
 
 ** =throttle=
@@ -2822,6 +3650,62 @@ describe('throttle', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::time::{Instant, Duration};
+
+pub struct ThrottleOptions {
+    pub leading: bool,
+    pub trailing: bool,
+}
+
+impl Default for ThrottleOptions {
+    fn default() -> Self {
+        Self { leading: true, trailing: true }
+    }
+}
+
+/// Limit emission rate with leading/trailing edge control.
+pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
+    ms: u64,
+    options: ThrottleOptions,
+    mut s: S,
+) -> impl Stream<Item = T> {
+    stream! {
+        let duration = Duration::from_millis(ms);
+        let mut last_emit = Instant::now() - duration;  // Allow first emit
+        let mut trailing_value: Option<T> = None;
+
+        while let Some(item) = s.next().await {
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_emit);
+
+            if elapsed >= duration {
+                if options.leading {
+                    yield item;
+                    last_emit = now;
+                    trailing_value = None;
+                } else {
+                    trailing_value = Some(item);
+                }
+            } else {
+                trailing_value = Some(item);
+            }
+        }
+
+        // Emit final trailing value
+        if options.trailing {
+            if let Some(value) = trailing_value {
+                yield value;
+            }
+        }
+    }
+}
+#+end_src
+
 * Error Handling
 
 ** =recoverWith= 
@@ -2937,6 +3821,50 @@ describe('recoverWith', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+In Rust, we use =Result= types for error handling in streams:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use std::error::Error;
+
+/// For streams that emit Result<T, E>, recover from errors.
+pub fn recover_with<T, E, S, S2, F>(
+    recover_fn: F,
+    s: S,
+) -> impl Stream<Item = T>
+where
+    S: Stream<Item = Result<T, E>>,
+    S2: Stream<Item = T>,
+    F: FnOnce(E) -> S2,
+    E: Error,
+{
+    stream! {
+        tokio::pin!(s);
+        loop {
+            match s.next().await {
+                Some(Ok(item)) => yield item,
+                Some(Err(e)) => {
+                    let recovery = recover_fn(e);
+                    tokio::pin!(recovery);
+                    while let Some(item) = recovery.next().await {
+                        yield item;
+                    }
+                    break;
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+// Alternatively, using TryStreamExt from futures:
+// use futures::TryStreamExt;
+// stream.or_else(|e| async move { Ok(fallback_value) })
+#+end_src
+
 ** =throwError=
 
 The =throwError= function creates a stream that immediately throws an error when consumed.
@@ -2996,6 +3924,28 @@ describe('throwError', () => {
       .toErrorWith('test error')
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+In Rust, we'd emit an =Err= in a Result stream:
+
+#+begin_src rust :tangle no
+use futures::stream::{self, Stream};
+
+/// Creates a stream that immediately emits an error.
+pub fn throw_error<T, E: Clone>(error: E) -> impl Stream<Item = Result<T, E>> {
+    stream::once(async move { Err(error) })
+}
+
+// For panicking (not recommended for production):
+use async_stream::stream;
+
+pub fn throw_panic<T>(message: &'static str) -> impl Stream<Item = T> {
+    stream! {
+        panic!("{}", message);
+    }
+}
 #+end_src
 
 ** =retry=
@@ -3156,6 +4106,64 @@ describe('retry', () => {
     expect(attempts).toBe(2)
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt, TryStreamExt};
+use tokio::time::{sleep, Duration};
+use std::error::Error;
+
+pub struct RetryOptions<F> {
+    pub max_attempts: usize,
+    pub delay_ms: u64,
+    pub should_retry: F,
+}
+
+/// Retry a stream factory on error.
+pub fn retry<T, E, S, F, SR>(
+    max_attempts: usize,
+    delay_ms: u64,
+    mut stream_factory: F,
+) -> impl Stream<Item = Result<T, E>>
+where
+    S: Stream<Item = Result<T, E>>,
+    F: FnMut() -> S,
+    E: Clone,
+{
+    stream! {
+        let mut attempt = 0;
+        loop {
+            let s = stream_factory();
+            tokio::pin!(s);
+            let mut failed = false;
+            
+            while let Some(item) = s.next().await {
+                match item {
+                    Ok(value) => yield Ok(value),
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= max_attempts {
+                            yield Err(e);
+                            return;
+                        }
+                        if delay_ms > 0 {
+                            sleep(Duration::from_millis(delay_ms)).await;
+                        }
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            
+            if !failed {
+                return;  // Stream completed successfully
+            }
+        }
+    }
+}
 #+end_src
 
 * Concurrent Operations
@@ -3359,6 +4367,62 @@ describe('merge', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=futures::stream::select= and =futures::stream::select_all= provide merge functionality:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt, stream};
+
+// For two streams:
+// stream::select(stream_a, stream_b)
+
+// For multiple streams:
+// stream::select_all(vec![stream_a, stream_b, stream_c].into_iter())
+
+// Custom implementation with tokio::select!:
+use async_stream::stream;
+use futures::future::FusedFuture;
+use std::pin::Pin;
+
+pub fn merge<T, S1: Stream<Item = T> + Unpin, S2: Stream<Item = T> + Unpin>(
+    mut s1: S1,
+    mut s2: S2,
+) -> impl Stream<Item = T> {
+    stream! {
+        loop {
+            tokio::select! {
+                biased;
+                item = s1.next() => {
+                    match item {
+                        Some(v) => yield v,
+                        None => {
+                            // s1 done, drain s2
+                            while let Some(v) = s2.next().await {
+                                yield v;
+                            }
+                            break;
+                        }
+                    }
+                }
+                item = s2.next() => {
+                    match item {
+                        Some(v) => yield v,
+                        None => {
+                            // s2 done, drain s1
+                            while let Some(v) = s1.next().await {
+                                yield v;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#+end_src
+
 ** =mergeAll=
 
 The =mergeAll= function flattens a stream of streams by merging them into a single stream.
@@ -3429,6 +4493,33 @@ describe('mergeAll', () => {
     expect(values).toEqual([])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::flatten_unordered= provides concurrent flattening:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: outer.flatten_unordered(None) // None = unlimited concurrency
+// Or: outer.flatten_unordered(Some(10))  // limit to 10 concurrent streams
+
+// Custom implementation using FuturesUnordered:
+use async_stream::stream;
+use futures::stream::FuturesUnordered;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub fn merge_all<T, Inner, Outer>(outer: Outer) -> impl Stream<Item = T>
+where
+    Inner: Stream<Item = T> + Unpin + Send + 'static,
+    Outer: Stream<Item = Inner> + Unpin,
+    T: Send + 'static,
+{
+    // For production, use flatten_unordered from futures
+    outer.flatten_unordered(None)
+}
 #+end_src
 
 ** =chain= / =flatMap=
@@ -3533,6 +4624,44 @@ describe('chain / flatMap', () => {
     expect(flatMap).toBe(chain)
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::flat_map_unordered= provides concurrent flatMap:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in concurrent flatMap:
+// stream.flat_map_unordered(None, |item| create_inner_stream(item))
+
+// For sequential flatMap (like concatMap), use flat_map:
+// stream.flat_map(|item| create_inner_stream(item))
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn flat_map<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    Inner: Stream<Item = U> + Unpin + Send + 'static,
+    F: Fn(T) -> Inner,
+    U: Send + 'static,
+{
+    s.map(f).flatten_unordered(None)
+}
+
+// Alias
+pub fn chain<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    Inner: Stream<Item = U> + Unpin + Send + 'static,
+    F: Fn(T) -> Inner,
+    U: Send + 'static,
+{
+    flat_map(f, s)
+}
 #+end_src
 
 ** =switchMap=
@@ -3688,6 +4817,66 @@ describe('switchMap', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::sync::mpsc;
+
+/// Switch to new inner stream on each outer value, cancelling previous.
+pub fn switch_map<T, U, S, Inner, F>(f: F, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T> + Unpin,
+    Inner: Stream<Item = U> + Unpin,
+    F: Fn(T) -> Inner,
+{
+    stream! {
+        tokio::pin!(s);
+        let mut current_inner: Option<std::pin::Pin<Box<dyn Stream<Item = U> + Unpin>>> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check outer stream first (higher priority for switching)
+                outer_item = s.next() => {
+                    match outer_item {
+                        Some(item) => {
+                            // Cancel old inner by dropping, start new one
+                            current_inner = Some(Box::pin(f(item)));
+                        }
+                        None => {
+                            // Outer done, drain current inner
+                            if let Some(ref mut inner) = current_inner {
+                                while let Some(v) = inner.next().await {
+                                    yield v;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Process current inner
+                inner_item = async {
+                    if let Some(ref mut inner) = current_inner {
+                        inner.next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    match inner_item {
+                        Some(v) => yield v,
+                        None => current_inner = None,
+                    }
+                }
+            }
+        }
+    }
+}
+#+end_src
+
 ** =latest=
 
 The =latest= function combines multiple streams into a single stream that emits a tuple of the latest values from each input stream whenever any of them emit a new value.
@@ -3787,6 +4976,55 @@ describe('latest', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=tokio_stream::StreamExt::merge= with state tracking or =futures::stream::SelectAll= patterns:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Combine two streams, emitting tuple of latest values.
+pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item = U> + Unpin>(
+    mut s1: S1,
+    mut s2: S2,
+) -> impl Stream<Item = (T, U)> {
+    stream! {
+        let mut latest1: Option<T> = None;
+        let mut latest2: Option<U> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                item = s1.next() => {
+                    match item {
+                        Some(v) => {
+                            latest1 = Some(v);
+                            if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) {
+                                yield (a.clone(), b.clone());
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                item = s2.next() => {
+                    match item {
+                        Some(v) => {
+                            latest2 = Some(v);
+                            if let (Some(ref a), Some(ref b)) = (&latest1, &latest2) {
+                                yield (a.clone(), b.clone());
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
+#+end_src
+
 ** =applyLatest=
 
 The =applyLatest= function applies the latest function from a stream of functions to the latest value from a stream of values.
@@ -3851,6 +5089,23 @@ describe('applyLatest', () => {
     values.forEach(v => expect(typeof v).toBe('number'))
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+/// Apply latest function to latest value.
+pub fn apply_latest<T, U, F, S1, S2>(fn_stream: S1, value_stream: S2) -> impl Stream<Item = U>
+where
+    S1: Stream<Item = F> + Unpin,
+    S2: Stream<Item = T> + Unpin,
+    F: Fn(T) -> U + Clone,
+    T: Clone,
+{
+    latest2(fn_stream, value_stream).map(|(f, v)| f(v))
+}
 #+end_src
 
 ** =untilStream=
@@ -3943,6 +5198,41 @@ describe('untilStream', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+=StreamExt::take_until= provides this functionality:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Emit from source until stop stream emits.
+pub fn until_stream<T, U, S: Stream<Item = T> + Unpin, Stop: Stream<Item = U> + Unpin>(
+    mut stop: Stop,
+    mut source: S,
+) -> impl Stream<Item = T> {
+    stream! {
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = stop.next() => break,
+                item = source.next() => {
+                    match item {
+                        Some(v) => yield v,
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Or use built-in:
+// use tokio_stream::StreamExt;
+// source.take_until(stop.next())
+#+end_src
+
 ** =sinceStream=
 
 The =sinceStream= function creates a stream that starts emitting values from the source stream only after another stream emits a value.
@@ -4033,6 +5323,47 @@ describe('sinceStream', () => {
     expect(Array.isArray(values)).toBe(true)
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Emit from source only after start stream emits.
+pub fn since_stream<T, U, S: Stream<Item = T> + Unpin, Start: Stream<Item = U> + Unpin>(
+    mut start: Start,
+    mut source: S,
+) -> impl Stream<Item = T> {
+    stream! {
+        let mut started = false;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = async {
+                    if !started {
+                        start.next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    started = true;
+                }
+
+                item = source.next() => {
+                    match item {
+                        Some(v) if started => yield v,
+                        Some(_) => {}  // Drop values before start
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
 #+end_src
 
 * Buffering
@@ -4130,6 +5461,35 @@ describe('buffer', () => {
     expect(values).toEqual([[1, 2], [3, 4]])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+=StreamExt::chunks= provides batching:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+
+// Built-in: stream.chunks(size)
+
+// Custom implementation:
+use async_stream::stream;
+
+pub fn buffer<T, S: Stream<Item = T>>(size: usize, s: S) -> impl Stream<Item = Vec<T>> {
+    stream! {
+        tokio::pin!(s);
+        let mut buf: Vec<T> = Vec::with_capacity(size);
+        while let Some(item) = s.next().await {
+            buf.push(item);
+            if buf.len() >= size {
+                yield std::mem::replace(&mut buf, Vec::with_capacity(size));
+            }
+        }
+        if !buf.is_empty() {
+            yield buf;
+        }
+    }
+}
 #+end_src
 
 ** =bufferTime=
@@ -4255,6 +5615,47 @@ describe('bufferTime', () => {
     expect(values.flat()).toEqual([1, 2])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::time::{interval, Duration, Instant};
+
+/// Buffer values over time windows.
+pub fn buffer_time<T, S: Stream<Item = T> + Unpin>(ms: u64, mut s: S) -> impl Stream<Item = Vec<T>> {
+    stream! {
+        let duration = Duration::from_millis(ms);
+        let mut buf: Vec<T> = Vec::new();
+        let mut timer = Box::pin(tokio::time::sleep(duration));
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut timer => {
+                    if !buf.is_empty() {
+                        yield std::mem::take(&mut buf);
+                    }
+                    timer = Box::pin(tokio::time::sleep(duration));
+                }
+                item = s.next() => {
+                    match item {
+                        Some(v) => buf.push(v),
+                        None => {
+                            if !buf.is_empty() {
+                                yield buf;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 #+end_src
 
 ** =window=
@@ -4405,6 +5806,54 @@ describe('window', () => {
     expect(windows.length).toBe(2)
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+Windowing in Rust typically uses channels to create sub-streams:
+
+#+begin_src rust :tangle no
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use tokio::sync::mpsc;
+
+/// Split source into windows of specified size.
+/// Each window is a separate stream.
+pub fn window<T: Send + 'static, S: Stream<Item = T> + Unpin>(
+    size: usize,
+    mut s: S,
+) -> impl Stream<Item = impl Stream<Item = T>> {
+    stream! {
+        loop {
+            let (tx, rx) = mpsc::channel::<T>(size);
+            let mut count = 0;
+            let mut done = false;
+
+            // Yield the receiver as a stream before filling
+            let window_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            yield window_stream;
+
+            // Fill the window
+            while count < size {
+                match s.next().await {
+                    Some(item) => {
+                        let _ = tx.send(item).await;
+                        count += 1;
+                    }
+                    None => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            drop(tx);  // Close the channel
+
+            if done {
+                break;
+            }
+        }
+    }
+}
 #+end_src
 
 ** =eager= and =eagerNow=
@@ -4671,6 +6120,74 @@ describe('eagerNow', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+Pre-fetching in Rust is typically done with buffered channels or background tasks:
+
+#+begin_src rust :tangle no
+use futures::{Stream, StreamExt};
+use tokio::sync::mpsc;
+use async_stream::stream;
+
+/// Pre-fetch values from a slow producer into a buffer.
+/// Starts lazily when first value is requested.
+pub fn eager<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
+    buffer_size: usize,
+    s: S,
+) -> impl Stream<Item = T> {
+    // Use a channel as the buffer
+    let (tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
+    
+    // Spawn background consumer on first pull
+    let mut spawned = false;
+    let mut s = Some(s);
+    
+    stream! {
+        if !spawned {
+            spawned = true;
+            let mut source = s.take().unwrap();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(item) = source.next().await {
+                    if tx.send(item).await.is_err() {
+                        break;  // Receiver dropped
+                    }
+                }
+            });
+        }
+        drop(tx);  // Drop our copy so channel closes when task finishes
+        
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
+    }
+}
+
+/// Pre-fetch values immediately on creation.
+pub fn eager_now<T: Send + 'static, S: Stream<Item = T> + Send + Unpin + 'static>(
+    buffer_size: usize,
+    s: S,
+) -> impl Stream<Item = T> {
+    let (tx, mut rx) = mpsc::channel::<T>(buffer_size.max(1));
+    
+    // Start consuming immediately
+    let mut source = s;
+    tokio::spawn(async move {
+        while let Some(item) = source.next().await {
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    
+    stream! {
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
+    }
+}
+#+end_src
+
 * Multicasting
 
 By default, async generators are single-consumer: each consumer pulls values independently.
@@ -4860,6 +6377,13 @@ describe('ReplaySubject', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+Rust's =tokio::sync::broadcast= provides similar multicasting capabilities:
+
+#+begin_src rust :tangle no
+use std::sync::{Arc, Mutex};\nuse tokio::sync::broadcast;\nuse futures::Stream;\nuse async_stream::stream;\n\n/// A multicasting subject that replays buffered values to new subscribers.\npub struct ReplaySubject<T: Clone + Send + 'static> {\n    buffer: Arc<Mutex<Vec<T>>>,\n    buffer_size: usize,\n    tx: broadcast::Sender<T>,\n}\n\nimpl<T: Clone + Send + 'static> ReplaySubject<T> {\n    pub fn new(buffer_size: usize) -> Self {\n        let (tx, _) = broadcast::channel(buffer_size.max(16));\n        Self {\n            buffer: Arc::new(Mutex::new(Vec::new())),\n            buffer_size,\n            tx,\n        }\n    }\n\n    pub fn next(&self, value: T) {\n        let mut buf = self.buffer.lock().unwrap();\n        buf.push(value.clone());\n        if buf.len() > self.buffer_size {\n            buf.remove(0);\n        }\n        let _ = self.tx.send(value);\n    }\n\n    pub fn subscribe(&self) -> impl Stream<Item = T> {\n        let buffer = self.buffer.lock().unwrap().clone();\n        let mut rx = self.tx.subscribe();\n        \n        stream! {\n            // Replay buffered values first\n            for item in buffer {\n                yield item;\n            }\n            // Then receive live values\n            while let Ok(item) = rx.recv().await {\n                yield item;\n            }\n        }\n    }\n}\n#+end_src
+
 ** =replay=
 
 The =replay= function wraps a source stream to allow multiple consumers.
@@ -4981,6 +6505,124 @@ describe('replay', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Replay creates a shared stream that buffers values for late subscribers.
+struct Replay<T> {
+    inner: Arc<Mutex<ReplayInner<T>>>,
+}
+
+struct ReplayInner<T> {
+    buffer: Vec<T>,
+    buffer_size: usize,
+    completed: bool,
+    error: Option<Arc<dyn std::error::Error + Send + Sync>>,
+    source_started: bool,
+    subscribers: Vec<tokio::sync::mpsc::UnboundedSender<Result<T, Arc<dyn std::error::Error + Send + Sync>>>>,
+}
+
+impl<T: Clone + Send + 'static> Replay<T> {
+    fn new<S>(buffer_size: usize, source: S) -> Self
+    where
+        S: futures::Stream<Item = T> + Send + Unpin + 'static,
+    {
+        let inner = Arc::new(Mutex::new(ReplayInner {
+            buffer: Vec::new(),
+            buffer_size,
+            completed: false,
+            error: None,
+            source_started: false,
+            subscribers: Vec::new(),
+        }));
+        
+        Replay { inner }
+    }
+    
+    fn subscribe(&self) -> impl futures::Stream<Item = T> {
+        let inner = self.inner.clone();
+        
+        async_stream::stream! {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            
+            // Get buffered values and register subscriber
+            let buffered: Vec<T>;
+            {
+                let mut guard = inner.lock().await;
+                buffered = guard.buffer.clone();
+                
+                if !guard.completed && guard.error.is_none() {
+                    guard.subscribers.push(tx);
+                }
+            }
+            
+            // Yield buffered values first
+            for value in buffered {
+                yield value;
+            }
+            
+            // Receive live values
+            while let Some(result) = rx.recv().await {
+                match result {
+                    Ok(value) => yield value,
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    
+    async fn start_source<S>(&self, mut source: S)
+    where
+        S: futures::Stream<Item = T> + Send + Unpin + 'static,
+    {
+        use futures::StreamExt;
+        
+        while let Some(value) = source.next().await {
+            let mut guard = self.inner.lock().await;
+            
+            // Buffer the value
+            guard.buffer.push(value.clone());
+            if guard.buffer.len() > guard.buffer_size {
+                guard.buffer.remove(0);
+            }
+            
+            // Broadcast to subscribers
+            guard.subscribers.retain(|tx| tx.send(Ok(value.clone())).is_ok());
+        }
+        
+        // Mark complete
+        let mut guard = self.inner.lock().await;
+        guard.completed = true;
+        guard.subscribers.clear();
+    }
+}
+
+/// Convenience function to replay a stream
+fn replay<T, S>(buffer_size: usize, source: S) -> impl futures::Stream<Item = T>
+where
+    T: Clone + Send + 'static,
+    S: futures::Stream<Item = T> + Send + Unpin + 'static,
+{
+    use std::sync::Once;
+    use futures::StreamExt;
+    
+    let replay = Arc::new(Replay::new(buffer_size, source));
+    let replay_clone = replay.clone();
+    
+    // Start source consumption on first subscribe
+    async_stream::stream! {
+        let stream = replay_clone.subscribe();
+        tokio::pin!(stream);
+        while let Some(value) = stream.next().await {
+            yield value;
+        }
+    }
+}
+#+end_src
+
 ** =share=
 
 The =share= function is like =replay= with a buffer size of 0.
@@ -5052,6 +6694,38 @@ describe('share', () => {
     expect(values2).toEqual([])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Share a stream among multiple consumers without buffering.
+/// This is equivalent to replay(0, source).
+fn share<T, S>(source: S) -> impl futures::Stream<Item = T>
+where
+    T: Clone + Send + 'static,
+    S: futures::Stream<Item = T> + Send + Unpin + 'static,
+{
+    replay(0, source)
+}
+
+// Example usage
+async fn share_example() {
+    use futures::StreamExt;
+    
+    // Since share has no buffer, late subscribers miss early values
+    let source = futures::stream::iter(vec![1, 2, 3]);
+    let shared = share(source);
+    
+    // First consumer gets values
+    tokio::pin!(shared);
+    while let Some(value) = shared.next().await {
+        println!("Got: {}", value);
+    }
+}
 #+end_src
 
 ** =replayFactory= and =replayStream=
@@ -5137,6 +6811,87 @@ describe('replayFactory', () => {
 })
 #+end_src
 
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Creates a factory that produces independent copies of a buffered stream.
+/// Each call to the factory returns a fresh stream that replays buffered values.
+fn replay_factory<T, S>(
+    buffer_size: usize,
+    source: S,
+) -> impl Fn() -> impl futures::Stream<Item = T>
+where
+    T: Clone + Send + Sync + 'static,
+    S: futures::Stream<Item = T> + Send + Unpin + 'static,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    
+    struct SharedState<T> {
+        buffer: Vec<T>,
+        buffer_size: usize,
+        completed: bool,
+        subscribers: Vec<tokio::sync::mpsc::UnboundedSender<T>>,
+    }
+    
+    let state = Arc::new(Mutex::new(SharedState {
+        buffer: Vec::new(),
+        buffer_size,
+        completed: false,
+        subscribers: Vec::new(),
+    }));
+    let started = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(Mutex::new(Some(source)));
+    
+    move || {
+        let state = state.clone();
+        let started = started.clone();
+        let source = source.clone();
+        
+        async_stream::stream! {
+            // Start source consumption if not already started
+            if !started.swap(true, Ordering::SeqCst) {
+                let state_clone = state.clone();
+                if let Some(mut src) = source.lock().await.take() {
+                    tokio::spawn(async move {
+                        use futures::StreamExt;
+                        while let Some(value) = src.next().await {
+                            let mut guard = state_clone.lock().await;
+                            guard.buffer.push(value.clone());
+                            if guard.buffer.len() > guard.buffer_size {
+                                guard.buffer.remove(0);
+                            }
+                            guard.subscribers.retain(|tx| tx.send(value.clone()).is_ok());
+                        }
+                        state_clone.lock().await.completed = true;
+                    });
+                }
+            }
+            
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let buffered: Vec<T>;
+            {
+                let mut guard = state.lock().await;
+                buffered = guard.buffer.clone();
+                if !guard.completed {
+                    guard.subscribers.push(tx);
+                }
+            }
+            
+            for value in buffered {
+                yield value;
+            }
+            
+            while let Some(value) = rx.recv().await {
+                yield value;
+            }
+        }
+    }
+}
+#+end_src
+
 ** =replayStream=
 
 =replayStream= returns a stream that emits independent copies of the source stream.
@@ -5183,6 +6938,48 @@ describe('replayStream', () => {
     expect(values).toEqual([1, 2, 3])
   })
 })
+#+end_src
+
+*** Rust Implementation
+
+#+begin_src rust :tangle no
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Returns a stream that emits independent copies of the source stream.
+/// Each pull creates a new subscriber that receives buffered + live values.
+fn replay_stream<T, S>(
+    buffer_size: usize,
+    source: S,
+) -> impl futures::Stream<Item = impl futures::Stream<Item = T>>
+where
+    T: Clone + Send + Sync + 'static,
+    S: futures::Stream<Item = T> + Send + Unpin + 'static,
+{
+    let factory = replay_factory(buffer_size, source);
+    
+    async_stream::stream! {
+        // Emit stream copies indefinitely
+        loop {
+            yield factory();
+        }
+    }
+}
+
+// Example usage
+async fn replay_stream_example() {
+    use futures::StreamExt;
+    
+    let source = futures::stream::iter(vec![1, 2, 3]);
+    let mut copies = replay_stream(usize::MAX, source);
+    
+    // Get first copy
+    if let Some(copy) = copies.next().await {
+        tokio::pin!(copy);
+        let values: Vec<_> = copy.collect().await;
+        println!("Copy values: {:?}", values);
+    }
+}
 #+end_src
 
 * Key Concepts
