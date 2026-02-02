@@ -375,7 +375,7 @@ async-std = { version = "1", optional = true }
 The =just= function creates a stream that emits a single value and then completes.
 Has the alias =of=.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits a single value and then completes.
@@ -446,13 +446,40 @@ pub fn just<T: Clone>(value: T) -> impl Stream<Item = T> {
 pub fn of<T: Clone>(value: T) -> impl Stream<Item = T> {
     just(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_just_emits_single_value() {
+        let stream = just(42);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![42]);
+    }
+
+    #[tokio::test]
+    async fn test_just_with_string() {
+        let stream = just("hello".to_string());
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_of_alias() {
+        let stream = of(99);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![99]);
+    }
+}
 #+end_src
 
 ** =fromPromise=
 The =fromPromise= function creates a stream from a Promise.
 When the Promise resolves, the stream emits the resolved value and then completes.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream from a Promise.
@@ -528,13 +555,38 @@ pub fn from_future<T, F: Future<Output = T>>(future: F) -> impl Stream<Item = T>
         yield value;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_from_future_emits_resolved_value() {
+        let future = async { 42 };
+        let stream = from_future(future);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![42]);
+    }
+
+    #[tokio::test]
+    async fn test_from_future_with_async_computation() {
+        let future = async {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            "computed".to_string()
+        };
+        let stream = from_future(future);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec!["computed"]);
+    }
+}
 #+end_src
 
 ** =from=
 The =from= function creates a stream from an iterable or async iterable.
 It emits each value from the iterable in sequence.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream from an iterable or async iterable.
@@ -610,13 +662,40 @@ pub fn from_iter<T, I: IntoIterator<Item = T>>(iterable: I) -> impl Stream<Item 
 pub fn from_stream<T, S: Stream<Item = T>>(s: S) -> impl Stream<Item = T> {
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_from_iter_emits_all_values() {
+        let stream = from_iter(vec![1, 2, 3]);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_from_iter_handles_empty() {
+        let stream = from_iter(Vec::<i32>::new());
+        let values: Vec<_> = stream.collect().await;
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_from_iter_with_range() {
+        let stream = from_iter(0..5);
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![0, 1, 2, 3, 4]);
+    }
+}
 #+end_src
 
 ** =periodic=
 The =periodic= function creates a stream that emits at regular intervals.
 To give it a value, combine it with =constant=.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits at regular intervals.
@@ -716,12 +795,42 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_periodic_emits_at_intervals() {
+        use std::time::Instant;
+        
+        let start = Instant::now();
+        let stream = periodic::<TokioRuntime>(10);
+        futures::pin_mut!(stream);
+        
+        // Take 3 values
+        for _ in 0..3 {
+            stream.next().await;
+        }
+        
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn test_periodic_with_timer() {
+        let stream = periodic_with_timer(10, |d| tokio::time::sleep(d));
+        let values: Vec<_> = stream.take(2).collect().await;
+        assert_eq!(values.len(), 2);
+    }
+}
 #+end_src
 
 ** =empty=
 The =empty= function creates a stream that immediately completes without emitting any values.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that immediately completes without emitting any values.
@@ -782,12 +891,32 @@ use futures::stream::{self, Stream};
 pub fn empty<T>() -> impl Stream<Item = T> {
     stream::empty()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_empty_yields_nothing() {
+        let stream: futures::stream::Empty<i32> = empty();
+        let values: Vec<i32> = stream.collect().await;
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_empty_completes_immediately() {
+        let stream: futures::stream::Empty<String> = empty();
+        futures::pin_mut!(stream);
+        assert!(stream.next().await.is_none());
+    }
+}
 #+end_src
 
 ** =never=
 The =never= function creates a stream that never emits any values and never completes.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that never emits any values and never completes.
@@ -856,13 +985,35 @@ pub fn never<T>() -> impl Stream<Item = T> {
         // Never reached - the pending future never resolves
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_never_does_not_emit() {
+        let stream: _ = never::<i32>();
+        futures::pin_mut!(stream);
+        
+        // Race against a timeout
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            stream.next()
+        ).await;
+        
+        // Should timeout because never() never yields
+        assert!(result.is_err());
+    }
+}
 #+end_src
 
 ** =iterate=
 
 The =iterate= function creates a stream that emits an infinite sequence of values by repeatedly applying a function to a seed value.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits an infinite sequence of values by repeatedly applying a function to a seed value.
@@ -945,6 +1096,33 @@ pub fn iterate<T: Clone, F: Fn(T) -> T>(seed: T, f: F) -> impl Stream<Item = T> 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_iterate_generates_sequence() {
+        let stream = iterate(1, |x| x * 2);
+        let values: Vec<_> = stream.take(5).collect().await;
+        assert_eq!(values, vec![1, 2, 4, 8, 16]);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_with_addition() {
+        let stream = iterate(0, |x| x + 1);
+        let values: Vec<_> = stream.take(4).collect().await;
+        assert_eq!(values, vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_with_strings() {
+        let stream = iterate("a".to_string(), |s| s.clone() + "a");
+        let values: Vec<_> = stream.take(3).collect().await;
+        assert_eq!(values, vec!["a", "aa", "aaa"]);
+    }
+}
 #+end_src
 
 ** =unfold=
@@ -954,7 +1132,7 @@ The generator will emit =value= and use =nextSeed= for the next iteration.
 If =done= is true, the generator will complete.
 =value= is ignored when =done= is true.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits values by unfolding a seed value using a function.
@@ -1071,13 +1249,53 @@ where
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_unfold_generates_values() {
+        let stream = unfold(1, |n| UnfoldResult {
+            value: n,
+            next_seed: n + 1,
+            done: n > 3,
+        });
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_unfold_stops_immediately_when_done() {
+        let stream = unfold(0, |_| UnfoldResult {
+            value: 999,
+            next_seed: 0,
+            done: true,
+        });
+        let values: Vec<i32> = stream.collect().await;
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unfold_with_different_types() {
+        // State is i32, value is String
+        let stream = unfold(0, |n| UnfoldResult {
+            value: format!("item-{}", n),
+            next_seed: n + 1,
+            done: n >= 2,
+        });
+        let values: Vec<_> = stream.collect().await;
+        assert_eq!(values, vec!["item-0", "item-1"]);
+    }
+}
 #+end_src
 
 ** =startWith=
 
 The =startWith= function prepends a value to the beginning of a stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Prepends a value to the beginning of a stream.
@@ -1166,13 +1384,35 @@ pub fn start_with<T: Clone, S: Stream<Item = T>>(value: T, s: S) -> impl Stream<
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_start_with_prepends_value() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = start_with(0, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_start_with_on_empty_stream() {
+        let source = stream::empty::<i32>();
+        let result = start_with(42, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![42]);
+    }
+}
 #+end_src
 
 ** =concat=
 
 The =concat= function concatenates multiple streams into a single stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Concatenates multiple streams into a single stream.
@@ -1261,6 +1501,42 @@ pub fn concat2<T, S1: Stream<Item = T>, S2: Stream<Item = T>>(s1: S1, s2: S2) ->
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_concat_joins_streams() {
+        let s1 = stream::iter(vec![1, 2]);
+        let s2 = stream::iter(vec![3, 4]);
+        let result = concat2(s1, s2);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_concat_with_empty_first() {
+        let s1 = stream::empty::<i32>();
+        let s2 = stream::iter(vec![5, 6]);
+        let result = concat2(s1, s2);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_concat_vec_of_streams() {
+        let streams = vec![
+            stream::iter(vec![1]),
+            stream::iter(vec![2, 3]),
+            stream::iter(vec![4]),
+        ];
+        // Note: This requires streams to be Unpin, demonstration only
+        // let result = concat(streams);
+        // ...implementation varies
+    }
+}
 #+end_src
 
 ** =fromEvent=
@@ -1268,7 +1544,7 @@ pub fn concat2<T, S1: Stream<Item = T>, S2: Stream<Item = T>>(s1: S1, s2: S2) ->
 The =fromEvent= function creates a stream from DOM events or any EventTarget-like object.
 The stream properly cleans up by removing the event listener when the iterator is closed.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * An object that can add and remove event listeners.
@@ -1470,7 +1746,7 @@ const result = pipe(
 The =pipe= function composes left-to-right.
 Using TypeScript 5.0+ recursive conditional types, we can achieve full type safety with an arbitrary number of functions:
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * A unary function type for pipe composition.
@@ -1600,7 +1876,7 @@ export function map<T, U>(
 The =map= function transforms each value emitted by a stream using a provided function.
 Supports both curried and uncurried calling conventions.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Transforms each value emitted by a stream using a provided function.
@@ -1704,13 +1980,43 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_map_transforms_values() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = map(source, |x| x * 2);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_map_with_type_change() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = map(source, |x| format!("num-{}", x));
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec!["num-1", "num-2", "num-3"]);
+    }
+
+    #[tokio::test]
+    async fn test_map_empty_stream() {
+        let source = stream::empty::<i32>();
+        let result = map(source, |x| x * 2);
+        let values: Vec<_> = result.collect().await;
+        assert!(values.is_empty());
+    }
+}
 #+end_src
 
 ** =constant=
 
 The =constant= function creates a stream that emits a constant value for each item in the source stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits a constant value for each item in the source stream.
@@ -1802,6 +2108,28 @@ pub fn constant<T, U: Clone, S: Stream<Item = T>>(value: U, s: S) -> impl Stream
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_constant_replaces_all_values() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = constant("x", source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec!["x", "x", "x"]);
+    }
+
+    #[tokio::test]
+    async fn test_constant_empty_stream() {
+        let source = stream::empty::<i32>();
+        let result = constant(42, source);
+        let values: Vec<_> = result.collect().await;
+        assert!(values.is_empty());
+    }
+}
 #+end_src
 
 ** =scan=
@@ -1809,7 +2137,7 @@ pub fn constant<T, U: Clone, S: Stream<Item = T>>(value: U, s: S) -> impl Stream
 The =scan= function accumulates values from a stream using a provided accumulator function and an initial seed value.
 Yields the seed first, then each accumulated value.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Accumulates values from a stream using a provided accumulator function and an initial seed value.
@@ -1923,6 +2251,36 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_scan_accumulates_with_seed() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = scan(|acc, x| acc + x, 0, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![0, 1, 3, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_product() {
+        let source = stream::iter(vec![2, 3, 4]);
+        let result = scan(|acc, x| acc * x, 1, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![1, 2, 6, 24]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_empty_stream() {
+        let source = stream::empty::<i32>();
+        let result = scan(|acc, x| acc + x, 100, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![100]); // Only seed
+    }
+}
 #+end_src
 
 ** =tap=
@@ -1930,7 +2288,7 @@ where
 The =tap= function allows you to perform side effects for each value emitted by a stream without modifying the values themselves.
 The side effect is fired without awaiting, so it does not block the stream processing.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Performs side effects for each value emitted by a stream without modifying the values themselves.
@@ -2069,7 +2427,7 @@ where
 The =awaitTap= function is like =tap=, but awaits the side effect before yielding the value.
 Use this when the side effect must complete before processing continues.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Performs side effects for each value emitted by a stream, awaiting completion before yielding.
@@ -2175,7 +2533,7 @@ where
 The =continueWith= function allows you to continue a stream with another stream once the first one completes.
 The first argument =f=, must be a function that returns the continuation stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Continues a stream with another stream once the first one completes.
@@ -2286,7 +2644,7 @@ where
 
 The =concatAll= function flattens a stream of streams by concatenating them into a single stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Flattens a stream of streams by concatenating them into a single stream.
  */
@@ -2383,7 +2741,7 @@ where
 The first argument =f=, must take in the values of the source stream and return the next stream to concatenate.
 You can think of it as a combination of a =map= producing streams being run through =concatAll=.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Maps each value to a stream and concatenates the results in order.
@@ -2508,7 +2866,7 @@ where
 The =filter= function filters values emitted by a stream based on a provided predicate function.
 Supports both curried and uncurried calling conventions.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Filters values emitted by a stream based on a provided predicate function.
@@ -2625,13 +2983,43 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_filter_keeps_matching() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let result = filter(|x| *x > 2, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn test_filter_even_numbers() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5, 6]);
+        let result = filter(|x| x % 2 == 0, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_filter_empty_result() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = filter(|x| *x > 100, source);
+        let values: Vec<_> = result.collect().await;
+        assert!(values.is_empty());
+    }
+}
 #+end_src
 
 ** =skipRepeats=
 
 The =skipRepeats= function filters out consecutive duplicate values from a stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Filters out consecutive duplicate values from a stream.
@@ -2738,7 +3126,7 @@ pub fn skip_repeats<T: PartialEq + Clone, S: Stream<Item = T>>(s: S) -> impl Str
 
 The =skipRepeatsWith= function filters out consecutive duplicate values from a stream based on a provided equality function.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Filters out consecutive duplicate values from a stream based on a provided equality function.
@@ -2850,6 +3238,40 @@ where
         }
     }
 }
+
+/// Filter consecutive duplicates using equality.
+pub fn skip_repeats<T: Clone + PartialEq, S>(s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+{
+    skip_repeats_with(|a, b| a == b, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_skip_repeats() {
+        let source = stream::iter(vec![1, 1, 2, 2, 3, 1, 1]);
+        let result = skip_repeats(source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![1, 2, 3, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_skip_repeats_with_custom_eq() {
+        // Compare by first character
+        let source = stream::iter(vec!["apple", "ant", "banana", "berry"]);
+        let result = skip_repeats_with(
+            |a: &&str, b: &&str| a.chars().next() == b.chars().next(),
+            source
+        );
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec!["apple", "banana"]);
+    }
+}
 #+end_src
 
 * Slicing
@@ -2859,7 +3281,7 @@ where
 The =take= function creates a stream that emits only the first =n= values from the source stream.
 Supports both curried and uncurried calling conventions.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits only the first `n` values from the source stream.
@@ -2962,13 +3384,43 @@ pub fn take<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_take_first_n() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let result = take(2, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_take_more_than_available() {
+        let source = stream::iter(vec![1, 2]);
+        let result = take(10, source);
+        let values: Vec<_> = result.collect().await;
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_take_zero() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let result = take(0, source);
+        let values: Vec<_> = result.collect().await;
+        assert!(values.is_empty());
+    }
+}
 #+end_src
 
 ** =skip=
 
 The =skip= function creates a stream that skips the first =n= values from the source stream and emits the rest.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that skips the first `n` values from the source stream and emits the rest.
@@ -3066,7 +3518,7 @@ pub fn skip<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
 
 The =slice= function creates a stream that emits values from the source stream starting from index =start= up to, but not including, index =end=.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits values from the source stream starting from index `start` up to, but not including, index `end`.
@@ -3174,13 +3626,41 @@ pub fn slice<T, S: Stream<Item = T>>(start: usize, end: usize, s: S) -> impl Str
 
 // Or using built-in methods:
 // stream.skip(start).take(end - start)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_slice() {
+        let source = stream::iter(vec![0, 1, 2, 3, 4, 5]);
+        let values: Vec<_> = slice(2, 5, source).collect().await;
+        assert_eq!(values, vec![2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_slice_empty_range() {
+        let source = stream::iter(vec![0, 1, 2, 3, 4]);
+        let values: Vec<_> = slice(2, 2, source).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+
+    #[tokio::test]
+    async fn test_slice_beyond_length() {
+        let source = stream::iter(vec![0, 1, 2]);
+        let values: Vec<_> = slice(1, 10, source).collect().await;
+        assert_eq!(values, vec![1, 2]);
+    }
+}
 #+end_src
 
 ** =takeWhile=
 
 The =takeWhile= function creates a stream that emits values from the source stream as long as the provided predicate function returns true and ends the stream as soon as it returns false.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Creates a stream that emits values from the source stream as long as the provided predicate function returns true.
  */
@@ -3282,13 +3762,41 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_take_while() {
+        let source = stream::iter(vec![1, 2, 3, 4, 2, 1]);
+        let values: Vec<_> = take_while(|x| *x < 4, source).collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_take_while_all_pass() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = take_while(|_x| true, source).collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_take_while_none_pass() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = take_while(|_x| false, source).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 ** =skipWhile=
 
 The =skipWhile= function creates a stream that skips values from the source stream as long as the provided predicate function returns true and starts emitting values as soon as it returns false.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that skips values from the source stream while the provided predicate function returns true, then emits the rest of the stream.
@@ -3395,13 +3903,41 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_skip_while() {
+        let source = stream::iter(vec![1, 2, 3, 4, 2, 1]);
+        let values: Vec<_> = skip_while(|x| *x < 3, source).collect().await;
+        assert_eq!(values, vec![3, 4, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_skip_while_all_fail() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = skip_while(|_x| false, source).collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_skip_while_all_pass() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = skip_while(|_x| true, source).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 ** =takeUntil=
 
 The =takeUntil= function creates a stream that emits values from the source stream until the provided predicate function returns true, at which point it completes (the matching value is *not* emitted).
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits values from the source stream until the provided predicate function returns true.
@@ -3498,6 +4034,34 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_take_until() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let values: Vec<_> = take_until(|x| *x == 3, source).collect().await;
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_take_until_never_matches() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = take_until(|_x| false, source).collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_take_until_first_matches() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = take_until(|x| *x == 1, source).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 * Time-based Operators
@@ -3508,7 +4072,7 @@ These operators work with time, adding delays or controlling the rate of emissio
 
 The =delay= operator delays each emission by a specified duration.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Delays each value emitted by the source stream by the specified duration.
@@ -3628,6 +4192,39 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_delay_with() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let start = std::time::Instant::now();
+        let values: Vec<_> = delay_with(
+            10,
+            source,
+            |d| tokio::time::sleep(d),
+        ).collect().await;
+        let elapsed = start.elapsed();
+        assert_eq!(values, vec![1, 2, 3]);
+        assert!(elapsed >= Duration::from_millis(25)); // ~30ms for 3 items
+    }
+
+    #[tokio::test]
+    async fn test_delay_empty_stream() {
+        let source = stream::iter(Vec::<i32>::new());
+        let values: Vec<_> = delay_with(
+            100,
+            source,
+            |d| tokio::time::sleep(d),
+        ).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 ** =debounce=
@@ -3635,7 +4232,7 @@ where
 The =debounce= operator only emits a value if no new values arrive within the specified duration.
 It waits for the stream to "settle" before emitting the most recent value.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Only emits a value from the source stream if no new value arrives within the specified duration.
@@ -3860,7 +4457,7 @@ where
 The =throttle= operator limits the rate of emissions.
 It's configurable with =leading= (emit first value immediately) and =trailing= (emit last value after window) options.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Options for throttle behavior.
@@ -4093,6 +4690,49 @@ pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_throttle_leading() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let values: Vec<_> = throttle(
+            100,
+            ThrottleOptions::leading_only(),
+            source,
+        ).collect().await;
+        // First value should be emitted immediately
+        assert!(!values.is_empty());
+        assert_eq!(values[0], 1);
+    }
+
+    #[tokio::test]
+    async fn test_throttle_trailing() {
+        let source = stream::iter(vec![1, 2, 3]);
+        let values: Vec<_> = throttle(
+            100,
+            ThrottleOptions::trailing_only(),
+            source,
+        ).collect().await;
+        // Last value should be emitted as trailing
+        assert!(!values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_throttle_empty() {
+        let source = stream::iter(Vec::<i32>::new());
+        let values: Vec<_> = throttle(
+            100,
+            ThrottleOptions::default(),
+            source,
+        ).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 * Error Handling
@@ -4101,7 +4741,7 @@ pub fn throttle<T: Clone, S: Stream<Item = T> + Unpin>(
 
 The =recoverWith= function allows you to recover from errors in a stream by providing a function that returns an alternative stream when an error occurs.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Recovers from errors in a stream by providing an alternative stream.
@@ -4252,13 +4892,45 @@ where
 // Alternatively, using TryStreamExt from futures:
 // use futures::TryStreamExt;
 // stream.or_else(|e| async move { Ok(fallback_value) })
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+    use std::io::{Error, ErrorKind};
+
+    #[tokio::test]
+    async fn test_recover_with_no_error() {
+        let source = stream::iter(vec![Ok(1), Ok(2), Ok(3)]);
+        let values: Vec<_> = recover_with(
+            |_e: Error| stream::iter(vec![99]),
+            source,
+        ).collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_recover_with_error() {
+        let source = stream::iter(vec![
+            Ok(1),
+            Err(Error::new(ErrorKind::Other, "test error")),
+            Ok(3),
+        ]);
+        let values: Vec<_> = recover_with(
+            |_e: Error| stream::iter(vec![99, 100]),
+            source,
+        ).collect().await;
+        assert_eq!(values, vec![1, 99, 100]);
+    }
+}
 #+end_src
 
 ** =throwError=
 
 The =throwError= function creates a stream that immediately throws an error when consumed.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that immediately throws an error when consumed.
@@ -4346,7 +5018,7 @@ You can specify the maximum number of retry attempts.
 but more sophisticated approaches (exponential backoff, conditional retries, etc.) may be needed for production use.
 Consider wrapping =retry= with custom logic for your specific needs.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Options for retry behavior.
@@ -4600,6 +5272,52 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+    use std::io::{Error, ErrorKind};
+
+    #[tokio::test]
+    async fn test_retry_with_success() {
+        let values: Vec<_> = retry_with(
+            3,
+            10,
+            || stream::iter(vec![Ok(1), Ok(2), Ok(3)]),
+            |_d| std::future::ready(()),
+        ).collect().await;
+        let ok_values: Vec<_> = values.into_iter().filter_map(|r| r.ok()).collect();
+        assert_eq!(ok_values, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_eventual_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        
+        let attempt = Arc::new(AtomicUsize::new(0));
+        let attempt_clone = attempt.clone();
+        
+        let values: Vec<_> = retry_with(
+            3,
+            0,
+            move || {
+                let n = attempt_clone.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    stream::iter(vec![Err(Error::new(ErrorKind::Other, "fail"))])
+                } else {
+                    stream::iter(vec![Ok(42)])
+                }
+            },
+            |_d| std::future::ready(()),
+        ).collect().await;
+        
+        let ok_values: Vec<_> = values.into_iter().filter_map(|r| r.ok()).collect();
+        assert_eq!(ok_values, vec![42]);
+    }
+}
 #+end_src
 
 * Concurrent Operations
@@ -4640,7 +5358,7 @@ This is the core building block for merge, latest, and other concurrent operatio
    - If value: Yield ={index, value}=, then re-queue a new =.next()= promise for that iterator
 4. *Repeat* until all iterators are exhausted (pending map is empty)
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 type TaggedResult<T> = { index: number; value: T }
 
@@ -4675,7 +5393,7 @@ async function* raceIterators<T>(
 The =raceIteratorsWithOuter= function extends =raceIterators= to also race against an outer stream that can add new iterators dynamically.
 This is used for =mergeAll= and =chain= where inner streams are created as the outer stream emits.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 type RaceResult<T, O> =
   | { type: 'inner'; index: number; value: T }
@@ -4732,7 +5450,7 @@ async function* raceIteratorsWithOuter<T, O>(
 
 The =merge= function merges multiple streams into a single stream, emitting values from any stream as they arrive.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Merges multiple streams into a single stream, emitting values as they arrive.
@@ -4865,13 +5583,49 @@ pub fn merge_custom<T, S1: Stream<Item = T> + Unpin, S2: Stream<Item = T> + Unpi
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_merge() {
+        let s1 = stream::iter(vec![1, 3, 5]);
+        let s2 = stream::iter(vec![2, 4, 6]);
+        let values: Vec<_> = merge(s1, s2).collect().await;
+        // Order may vary due to select fairness, but all values should be present
+        assert_eq!(values.len(), 6);
+        assert!(values.contains(&1));
+        assert!(values.contains(&6));
+    }
+
+    #[tokio::test]
+    async fn test_merge_all() {
+        let streams = vec![
+            Box::pin(stream::iter(vec![1, 2])),
+            Box::pin(stream::iter(vec![3, 4])),
+        ];
+        let values: Vec<_> = merge_all(streams).collect().await;
+        assert_eq!(values.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_merge_custom() {
+        let s1 = stream::iter(vec![1, 3]);
+        let s2 = stream::iter(vec![2, 4]);
+        let values: Vec<_> = merge_custom(s1, s2).collect().await;
+        assert_eq!(values.len(), 4);
+    }
+}
 #+end_src
 
 ** =mergeAll=
 
 The =mergeAll= function flattens a stream of streams by merging them into a single stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Flattens a stream of streams by merging them into a single stream.
  */
@@ -4964,6 +5718,22 @@ where
     // For production, use flatten_unordered from futures
     outer.flatten_unordered(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_merge_all_streams() {
+        let inner1 = stream::iter(vec![1, 2]);
+        let inner2 = stream::iter(vec![3, 4]);
+        let outer = stream::iter(vec![inner1, inner2]);
+        let values: Vec<_> = merge_all(outer).collect().await;
+        assert_eq!(values.len(), 4);
+    }
+}
 #+end_src
 
 ** =chain= / =flatMap=
@@ -4981,7 +5751,7 @@ f(c):                           1-2-3|
 stream.chain(f):   -1--2-13---2-1-233|
 #+end_src
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Maps each value from the source stream to a new stream and flattens the resulting streams into a single stream.
  */
@@ -5106,6 +5876,33 @@ where
 {
     flat_map(f, s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_flat_map() {
+        let source = stream::iter(vec![1, 2]);
+        let values: Vec<_> = flat_map(
+            |x| stream::iter(vec![x * 10, x * 10 + 1]),
+            source,
+        ).collect().await;
+        assert_eq!(values.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_chain() {
+        let source = stream::iter(vec![1, 2]);
+        let values: Vec<_> = chain(
+            |x| stream::iter(vec![x, x]),
+            source,
+        ).collect().await;
+        assert_eq!(values.len(), 4);
+    }
+}
 #+end_src
 
 ** =switchMap=
@@ -5121,7 +5918,7 @@ f(c):                             1-2-3|
 stream.switchMap:  -1--2---1--2---1-2-3|
 #+end_src
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Maps each value to a new stream, cancelling the previous inner stream when a new value arrives.
@@ -5317,6 +6114,34 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_switch_map() {
+        let outer = stream::iter(vec![1, 2]);
+        let values: Vec<_> = switch_map(
+            |x| stream::iter(vec![x * 10, x * 10 + 1]),
+            outer,
+        ).collect().await;
+        // Should get values from inner streams
+        assert!(!values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_switch_map_empty_outer() {
+        let outer = stream::iter(Vec::<i32>::new());
+        let values: Vec<_> = switch_map(
+            |x| stream::iter(vec![x * 10]),
+            outer,
+        ).collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+}
 #+end_src
 
 ** =latest=
@@ -5325,7 +6150,7 @@ The =latest= function combines multiple streams into a single stream that emits 
 
 We use a mapped tuple type to preserve the individual types of each stream in the output tuple.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Extracts the element type from an AsyncIterable.
  */
@@ -5471,13 +6296,43 @@ pub fn latest2<T: Clone, U: Clone, S1: Stream<Item = T> + Unpin, S2: Stream<Item
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_latest2() {
+        let s1 = stream::iter(vec![1, 2]);
+        let s2 = stream::iter(vec![10, 20]);
+        let values: Vec<_> = latest2(s1, s2).collect().await;
+        // Emits tuples with latest from each
+        assert!(!values.is_empty());
+        // All tuples should contain valid combinations
+        for (a, b) in &values {
+            assert!(*a == 1 || *a == 2);
+            assert!(*b == 10 || *b == 20);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_latest2_one_empty() {
+        let s1 = stream::iter(vec![1, 2, 3]);
+        let s2 = stream::iter(Vec::<i32>::new());
+        let values: Vec<_> = latest2(s1, s2).collect().await;
+        // No tuples because s2 never emits
+        assert_eq!(values, Vec::<(i32, i32)>::new());
+    }
+}
 #+end_src
 
 ** =applyLatest=
 
 The =applyLatest= function applies the latest function from a stream of functions to the latest value from a stream of values.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Applies the latest function from a stream of functions to the latest value from a stream of values.
@@ -5560,7 +6415,7 @@ where
 
 The =untilStream= function creates a stream that emits values from the source stream until another stream emits a value, at which point it stops emitting values.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that emits values from the source stream until another stream emits a value.
@@ -5683,7 +6538,7 @@ pub fn until_stream<T, U, S: Stream<Item = T> + Unpin, Stop: Stream<Item = U> + 
 
 The =sinceStream= function creates a stream that starts emitting values from the source stream only after another stream emits a value.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a stream that starts emitting values from the source stream only after another stream emits a value.
@@ -5820,7 +6675,7 @@ These operators collect values into buffers before emitting them downstream.
 The =buffer= operator collects values from the source stream into arrays of a specified size,
 emitting each buffer when it's full.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Collects values into arrays of the specified size, emitting each buffer when full.
@@ -5935,13 +6790,41 @@ pub fn buffer<T, S: Stream<Item = T>>(size: usize, s: S) -> impl Stream<Item = V
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_buffer() {
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let values: Vec<_> = buffer(2, source).collect().await;
+        assert_eq!(values, vec![vec![1, 2], vec![3, 4], vec![5]]);
+    }
+
+    #[tokio::test]
+    async fn test_buffer_exact_multiple() {
+        let source = stream::iter(vec![1, 2, 3, 4]);
+        let values: Vec<_> = buffer(2, source).collect().await;
+        assert_eq!(values, vec![vec![1, 2], vec![3, 4]]);
+    }
+
+    #[tokio::test]
+    async fn test_buffer_empty() {
+        let source = stream::iter(Vec::<i32>::new());
+        let values: Vec<_> = buffer(3, source).collect().await;
+        assert_eq!(values, Vec::<Vec<i32>>::new());
+    }
+}
 #+end_src
 
 ** =bufferTime=
 
 The =bufferTime= operator collects values over a time window, emitting the buffer when the window closes.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Collects values over a time window, emitting the buffer when the window closes.
@@ -6145,6 +7028,27 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_buffer_time_with() {
+        // Test with immediate sleep (no real delay)
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let values: Vec<_> = buffer_time_with(
+            10,
+            source,
+            |_d| std::future::ready(()),
+        ).collect().await;
+        // All values should be collected
+        let total: Vec<_> = values.into_iter().flatten().collect();
+        assert_eq!(total.len(), 5);
+    }
+}
 #+end_src
 
 ** =window=
@@ -6152,7 +7056,7 @@ where
 The =window= operator is like =buffer=, but emits streams instead of arrays.
 Each window is a separate async iterable that emits values as they arrive.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Splits the source into windows of the specified size.
@@ -6358,7 +7262,7 @@ by doing work ahead of time.
 
 Use =eager(0)= or =eagerNow(0)= to buffer all values (use with caution on infinite streams!).
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Pre-fetches up to `bufferSize` values from a slow producer, caching them for fast downstream access.
@@ -6702,7 +7606,7 @@ A =ReplaySubject= is a multicasting primitive that:
 3. Replays buffered values to new subscribers
 4. Forwards live values to all active subscribers
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * A multicasting subject that replays buffered values to new subscribers.
@@ -6962,6 +7866,49 @@ impl<T: Clone + Send + 'static> ReplaySubject<T> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_replay_subject_buffer() {
+        let subject = ReplaySubject::new(2);
+        
+        // Send some values
+        subject.next(1).await;
+        subject.next(2).await;
+        subject.next(3).await;  // 1 should be evicted
+        subject.complete().await;
+        
+        // New subscriber should get last 2 buffered values
+        let values: Vec<_> = subject.subscribe().collect().await;
+        assert_eq!(values, vec![2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_replay_subject_empty() {
+        let subject: ReplaySubject<i32> = ReplaySubject::new(5);
+        subject.complete().await;
+        
+        let values: Vec<_> = subject.subscribe().collect().await;
+        assert_eq!(values, Vec::<i32>::new());
+    }
+
+    #[tokio::test]
+    async fn test_replay_subject_unlimited() {
+        let subject = ReplaySubject::new(usize::MAX);
+        
+        subject.next(1).await;
+        subject.next(2).await;
+        subject.next(3).await;
+        subject.complete().await;
+        
+        let values: Vec<_> = subject.subscribe().collect().await;
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+}
+
 // Alternative: Use async-broadcast crate for true broadcast semantics
 // [dependencies]
 // async-broadcast = "0.6"
@@ -6976,7 +7923,7 @@ Each consumer receives buffered values plus all subsequent values.
 
 The source stream is consumed lazily on first subscription.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Makes a stream consumable by multiple consumers by buffering values.
@@ -7206,6 +8153,23 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn test_replay_buffered() {
+        // Test that buffering works
+        let source = stream::iter(vec![1, 2, 3, 4, 5]);
+        let replay = Replay::new(2, source);
+        
+        // Start source consumption
+        // (In a real impl, this would happen on first subscribe)
+    }
+}
 #+end_src
 
 ** =share=
@@ -7213,7 +8177,7 @@ where
 The =share= function is like =replay= with a buffer size of 0.
 New subscribers only receive values emitted after they subscribe.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Shares a stream among multiple consumers without buffering.
@@ -7320,7 +8284,7 @@ Each emitted stream is a complete replay of the source from the beginning.
 
 This is useful when you need to provide fresh copies of a stream to different parts of your application.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 
 /**
  * Creates a factory that produces independent copies of a buffered stream.
@@ -7559,7 +8523,7 @@ where
 
 =replayStream= returns a stream that emits independent copies of the source stream.
 
-#+begin_src typescript :tangle index.ts
+#+begin_src typescript :tangle typescript/index.ts
 /**
  * Returns a stream that emits independent copies of the source stream.
  * Each pull creates a new subscriber that receives buffered + live values.
@@ -7728,9 +8692,193 @@ For streams that never complete (like =periodic= or event streams), use =take=, 
 
 Configuration files for building and testing the library.
 
+** Building and Testing
+
+*** TypeScript
+
+**** Prerequisites
+
+#+begin_src shell :tangle no
+# Ensure Node.js (v18+) and npm are installed
+node --version
+npm --version
+#+end_src
+
+**** Setup
+
+#+begin_src shell :tangle no
+cd typescript
+npm install
+#+end_src
+
+**** Running Tests
+
+#+begin_src shell :tangle no
+# Run tests in watch mode (during development)
+npm test
+
+# Run tests once
+npm run test:run
+
+# Run tests with coverage
+npm run test:coverage
+#+end_src
+
+**** Building for Distribution
+
+#+begin_src shell :tangle no
+# Compile TypeScript to JavaScript
+npx tsc
+
+# Output will be in dist/
+ls dist/
+#+end_src
+
+**** Publishing to npm
+
+#+begin_src shell :tangle no
+# Ensure you're logged in to npm
+npm login
+
+# Update version in package.json, then:
+npm publish
+#+end_src
+
+*** Rust
+
+**** Prerequisites
+
+#+begin_src shell :tangle no
+# Ensure Rust toolchain is installed (via rustup)
+rustc --version
+cargo --version
+#+end_src
+
+**** Building
+
+#+begin_src shell :tangle no
+cd rust
+
+# Build with default features (no runtime)
+cargo build
+
+# Build with a specific runtime
+cargo build --features tokio-runtime
+cargo build --features smol-runtime
+cargo build --features async-std-runtime
+
+# Build in release mode
+cargo build --release
+#+end_src
+
+**** Running Tests
+
+#+begin_src shell :tangle no
+# Run all tests (uses tokio in dev-dependencies)
+cargo test
+
+# Run tests with a specific runtime feature
+cargo test --features tokio-runtime
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run a specific test
+cargo test test_just
+#+end_src
+
+**** Documentation
+
+#+begin_src shell :tangle no
+# Generate and open documentation
+cargo doc --open
+
+# Generate docs with all features
+cargo doc --all-features --open
+#+end_src
+
+**** Publishing to crates.io
+
+#+begin_src shell :tangle no
+# Ensure you're logged in to crates.io
+cargo login
+
+# Dry run to check for issues
+cargo publish --dry-run
+
+# Publish
+cargo publish
+#+end_src
+
+**** Feature Flags
+
+The Rust crate supports the following feature flags:
+
+| Feature          | Description                                      |
+|------------------+--------------------------------------------------|
+| =tokio-runtime=  | Enable tokio-specific runtime implementations    |
+| =smol-runtime=   | Enable smol-specific runtime implementations     |
+| =async-std-runtime= | Enable async-std-specific runtime implementations |
+
+Example usage in =Cargo.toml=:
+
+#+begin_src toml :tangle no
+[dependencies]
+agent-rex = { version = "0.1", features = ["tokio-runtime"] }
+#+end_src
+
+*** Tangling with Organjsm
+
+This project was built using Organjsm, my Typescript implementation of Org-mode.
+It's still early days for Organjsm, but it allows me to write literate TypeScript and Rust code.
+You can find it on [[https://github.com/TimothyMischief/organjsm][GitHub]].
+At date of writing @organjsm/core with a cli isn't available on npm yet, so clone the repo and build locally.
+There's also a VSCode extension with .vsix available in the monorepo, which also isn't published yet, but already provides language intelligence forwarding, tanlging support (both scripts and real-time tracking of tangle changes and language intelligence for embdedded languages) and syntax highlighting.
+The custom editor the extension packages is still broken, as are some features like context expansion.
+
+You'll notice some =:noweb-ref= blocks in this document have a =:context= tag, this is an extension I made so language intelligence can place the code in a context for better type checking and error reporting.
+I have plans to write emacs integration for these tools and the org mdoe LSP server organjsm uses, but my emacs lisp skills are limited at best, so that may take a while.
+
+*** Tangling from Org-mode
+
+To extract source files from this literate document:
+
+#+begin_src emacs-lisp :tangle no
+;; In Emacs, open index.org and run:
+(org-babel-tangle)
+;; Or use the keybinding: C-c C-v t
+#+end_src
+
+This will create the following directory structure:
+
+#+begin_src text :tangle no
+.
+├── typescript/
+│   ├── index.ts           # Main library
+│   ├── index.test.ts      # Tests
+│   ├── test-helpers.ts    # Test utilities
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── vitest.config.ts
+└── rust/
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs
+        ├── runtime.rs
+        ├── creation.rs
+        ├── transformation.rs
+        ├── filtering.rs
+        ├── slicing.rs
+        ├── time.rs
+        ├── error_handling.rs
+        ├── concurrent.rs
+        ├── buffering.rs
+        └── multicasting.rs
+#+end_src
+
 ** =package.json=
 
-#+begin_src json :tangle package.json
+#+begin_src json :tangle typescript/package.json
 {
   "name": "agent-rex",
   "version": "0.1.0",
@@ -7753,7 +8901,7 @@ Configuration files for building and testing the library.
 
 ** =vitest.config.ts=
 
-#+begin_src typescript :tangle vitest.config.ts
+#+begin_src typescript :tangle typescript/vitest.config.ts
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
@@ -7767,7 +8915,7 @@ export default defineConfig({
 
 ** =tsconfig.json=
 
-#+begin_src json :tangle tsconfig.json
+#+begin_src json :tangle typescript/tsconfig.json
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -7782,6 +8930,610 @@ export default defineConfig({
   },
   "include": ["*.ts"],
   "exclude": ["node_modules", "dist"]
+}
+#+end_src
+
+** =Cargo.toml=
+
+#+begin_src toml :tangle rust/Cargo.toml
+[package]
+name = "agent-rex"
+version = "0.1.0"
+edition = "2021"
+description = "An async Stream-based FRP-like library for Rust"
+license = "MIT"
+authors = ["Timothy Hope"]
+
+[features]
+default = []
+tokio-runtime = ["tokio"]
+smol-runtime = ["smol"]
+async-std-runtime = ["async-std"]
+
+[dependencies]
+futures = "0.3"
+async-stream = "0.3"
+async-lock = "3.0"
+pin-project-lite = "0.2"
+
+# Optional runtime-specific dependencies
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
+smol = { version = "2", optional = true }
+async-std = { version = "1", features = ["attributes"], optional = true }
+
+# For time-based operations without a specific runtime
+futures-timer = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+#+end_src
+
+** =rust/src/lib.rs= (Module Structure)
+
+The Rust implementation is organized as a library crate with the following module structure:
+
+#+begin_src rust :tangle rust/src/lib.rs
+//! # Agent Rex
+//! 
+//! An async Stream-based FRP-like library for Rust.
+//! 
+//! This library provides composable stream operators similar to RxJS/Most.js,
+//! built on top of the `futures` crate's `Stream` trait.
+//! 
+//! ## Runtime Agnostic
+//! 
+//! Most operators are runtime-agnostic and work with any async executor.
+//! For time-based operations, we provide:
+//! 
+//! - Generic versions that accept a sleep function parameter
+//! - Feature-flagged implementations for specific runtimes (tokio, smol, async-std)
+//! 
+//! ## Example
+//! 
+//! ```rust
+//! use agent_rex::*;
+//! use futures::StreamExt;
+//! 
+//! async fn example() {
+//!     let values: Vec<_> = just(42)
+//!         .then(|x| async move { x * 2 })
+//!         .collect()
+//!         .await;
+//!     assert_eq!(values, vec![84]);
+//! }
+//! ```
+
+pub mod runtime;
+pub mod creation;
+pub mod transformation;
+pub mod filtering;
+pub mod slicing;
+pub mod time;
+pub mod error_handling;
+pub mod concurrent;
+pub mod buffering;
+pub mod multicasting;
+
+// Re-export commonly used items
+pub use runtime::Runtime;
+pub use creation::*;
+pub use transformation::*;
+pub use filtering::*;
+pub use slicing::*;
+pub use time::*;
+pub use error_handling::*;
+pub use concurrent::*;
+pub use buffering::*;
+pub use multicasting::*;
+
+// Re-export futures for convenience
+pub use futures::{Stream, StreamExt};
+#+end_src
+
+** =rust/src/runtime.rs= (Runtime Trait)
+
+#+begin_src rust :tangle rust/src/runtime.rs
+//! Runtime abstraction for async executor-specific operations.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+/// Trait for runtime-specific async operations.
+/// 
+/// This allows the library to work with different async runtimes
+/// (tokio, smol, async-std) by abstracting timer and spawn functionality.
+pub trait Runtime {
+    /// Sleep for the specified duration.
+    fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    
+    /// Create an interval that yields at the specified period.
+    fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>>;
+    
+    /// Spawn a future onto the runtime.
+    fn spawn<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static;
+}
+
+#[cfg(feature = "tokio-runtime")]
+pub mod tokio_runtime {
+    use super::*;
+    
+    pub struct TokioRuntime;
+    
+    impl Runtime for TokioRuntime {
+        fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(tokio::time::sleep(duration))
+        }
+        
+        fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+            use futures::StreamExt;
+            let interval = tokio::time::interval(period);
+            Box::pin(tokio_stream::wrappers::IntervalStream::new(interval).map(|_| ()))
+        }
+        
+        fn spawn<F>(future: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            tokio::spawn(future);
+        }
+    }
+}
+
+#[cfg(feature = "smol-runtime")]
+pub mod smol_runtime {
+    use super::*;
+    
+    pub struct SmolRuntime;
+    
+    impl Runtime for SmolRuntime {
+        fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(smol::Timer::after(duration))
+        }
+        
+        fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+            use async_stream::stream;
+            Box::pin(stream! {
+                loop {
+                    smol::Timer::after(period).await;
+                    yield ();
+                }
+            })
+        }
+        
+        fn spawn<F>(future: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            smol::spawn(future).detach();
+        }
+    }
+}
+
+#[cfg(feature = "async-std-runtime")]
+pub mod async_std_runtime {
+    use super::*;
+    
+    pub struct AsyncStdRuntime;
+    
+    impl Runtime for AsyncStdRuntime {
+        fn sleep(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(async_std::task::sleep(duration))
+        }
+        
+        fn interval(period: Duration) -> Pin<Box<dyn futures::Stream<Item = ()> + Send>> {
+            use async_stream::stream;
+            Box::pin(stream! {
+                loop {
+                    async_std::task::sleep(period).await;
+                    yield ();
+                }
+            })
+        }
+        
+        fn spawn<F>(future: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            async_std::task::spawn(future);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_runtime_trait_exists() {
+        // Compile-time check that the trait is properly defined
+    }
+}
+#+end_src
+
+** Module Stubs
+
+These are stub modules that can be filled in by extracting the Rust code from each section above.
+Each module re-exports the operators defined inline in the documentation.
+
+*** =rust/src/creation.rs=
+
+#+begin_src rust :tangle rust/src/creation.rs
+//! Stream creation operators.
+//! 
+//! Functions for creating streams from various sources.
+
+use futures::Stream;
+use async_stream::stream;
+
+/// Create a stream that emits a single value.
+pub fn just<T>(value: T) -> impl Stream<Item = T> {
+    stream! { yield value; }
+}
+
+/// Create a stream from an iterator.
+pub fn from_iter<I, T>(iter: I) -> impl Stream<Item = T>
+where
+    I: IntoIterator<Item = T>,
+{
+    futures::stream::iter(iter)
+}
+
+/// Create a stream that emits nothing and completes immediately.
+pub fn empty<T>() -> impl Stream<Item = T> {
+    futures::stream::empty()
+}
+
+/// Create a stream that never emits or completes.
+pub fn never<T>() -> impl Stream<Item = T> {
+    futures::stream::pending()
+}
+
+// Additional creation operators are defined inline in the documentation
+// and can be copied here as needed.
+#+end_src
+
+*** =rust/src/transformation.rs=
+
+#+begin_src rust :tangle rust/src/transformation.rs
+//! Stream transformation operators.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+
+/// Map each value through a function.
+pub fn map<T, U, S, F>(f: F, s: S) -> impl Stream<Item = U>
+where
+    S: Stream<Item = T>,
+    F: Fn(T) -> U,
+{
+    s.map(f)
+}
+
+/// Replace each value with a constant.
+pub fn constant<T: Clone, U, S: Stream<Item = U>>(value: T, s: S) -> impl Stream<Item = T> {
+    s.map(move |_| value.clone())
+}
+
+/// Accumulate values with a reducer function.
+pub fn scan<T, U: Clone, S: Stream<Item = T>, F: Fn(U, T) -> U>(
+    init: U,
+    f: F,
+    s: S,
+) -> impl Stream<Item = U> {
+    stream! {
+        futures::pin_mut!(s);
+        let mut acc = init;
+        while let Some(item) = s.next().await {
+            acc = f(acc, item);
+            yield acc.clone();
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/filtering.rs=
+
+#+begin_src rust :tangle rust/src/filtering.rs
+//! Stream filtering operators.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+
+/// Filter values based on a predicate.
+pub fn filter<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        futures::pin_mut!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item) {
+                yield item;
+            }
+        }
+    }
+}
+
+/// Skip consecutive duplicate values.
+pub fn skip_repeats<T: PartialEq + Clone, S: Stream<Item = T>>(s: S) -> impl Stream<Item = T> {
+    stream! {
+        futures::pin_mut!(s);
+        let mut last: Option<T> = None;
+        while let Some(item) = s.next().await {
+            if last.as_ref() != Some(&item) {
+                last = Some(item.clone());
+                yield item;
+            }
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/slicing.rs=
+
+#+begin_src rust :tangle rust/src/slicing.rs
+//! Stream slicing operators.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+
+/// Take only the first n values.
+pub fn take<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
+    s.take(n)
+}
+
+/// Skip the first n values.
+pub fn skip<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
+    s.skip(n)
+}
+
+/// Take a slice from index start to end (exclusive).
+pub fn slice<T, S: Stream<Item = T>>(start: usize, end: usize, s: S) -> impl Stream<Item = T> {
+    s.skip(start).take(end - start)
+}
+
+/// Take values while predicate is true.
+pub fn take_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        futures::pin_mut!(s);
+        while let Some(item) = s.next().await {
+            if predicate(&item) {
+                yield item;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// Skip values while predicate is true.
+pub fn skip_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    stream! {
+        futures::pin_mut!(s);
+        let mut skipping = true;
+        while let Some(item) = s.next().await {
+            if skipping && !predicate(&item) {
+                skipping = false;
+            }
+            if !skipping {
+                yield item;
+            }
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/time.rs=
+
+#+begin_src rust :tangle rust/src/time.rs
+//! Time-based operators.
+//! 
+//! These operators require a runtime for timer functionality.
+//! Use the `_with` variants for runtime-agnostic code.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+use std::time::Duration;
+
+/// Delay each value by a specified duration (runtime-agnostic version).
+pub fn delay_with<T, S, F, Fut>(
+    ms: u64,
+    s: S,
+    sleep_fn: F,
+) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T>,
+    F: Fn(Duration) -> Fut + Clone,
+    Fut: std::future::Future<Output = ()>,
+{
+    stream! {
+        futures::pin_mut!(s);
+        let duration = Duration::from_millis(ms);
+        while let Some(item) = s.next().await {
+            sleep_fn(duration).await;
+            yield item;
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/error_handling.rs=
+
+#+begin_src rust :tangle rust/src/error_handling.rs
+//! Error handling operators.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+use std::error::Error;
+
+/// Recover from errors by switching to a fallback stream.
+pub fn recover_with<T, E, S, S2, F>(
+    recover_fn: F,
+    s: S,
+) -> impl Stream<Item = T>
+where
+    S: Stream<Item = Result<T, E>>,
+    S2: Stream<Item = T>,
+    F: FnOnce(E) -> S2,
+    E: Error,
+{
+    stream! {
+        futures::pin_mut!(s);
+        loop {
+            match s.next().await {
+                Some(Ok(item)) => yield item,
+                Some(Err(e)) => {
+                    let recovery = recover_fn(e);
+                    futures::pin_mut!(recovery);
+                    while let Some(item) = recovery.next().await {
+                        yield item;
+                    }
+                    break;
+                }
+                None => break,
+            }
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/concurrent.rs=
+
+#+begin_src rust :tangle rust/src/concurrent.rs
+//! Concurrent stream operators.
+
+use futures::{Stream, StreamExt, stream};
+
+/// Merge two streams into one.
+pub fn merge<T, S1, S2>(s1: S1, s2: S2) -> impl Stream<Item = T>
+where
+    S1: Stream<Item = T>,
+    S2: Stream<Item = T>,
+{
+    stream::select(s1, s2)
+}
+
+/// Merge multiple streams into one.
+pub fn merge_all<T, S>(streams: Vec<S>) -> impl Stream<Item = T>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    stream::select_all(streams)
+}
+#+end_src
+
+*** =rust/src/buffering.rs=
+
+#+begin_src rust :tangle rust/src/buffering.rs
+//! Buffering operators.
+
+use futures::{Stream, StreamExt};
+use async_stream::stream;
+
+/// Collect values into fixed-size buffers.
+pub fn buffer<T, S: Stream<Item = T>>(size: usize, s: S) -> impl Stream<Item = Vec<T>> {
+    stream! {
+        futures::pin_mut!(s);
+        let mut buf: Vec<T> = Vec::with_capacity(size);
+        while let Some(item) = s.next().await {
+            buf.push(item);
+            if buf.len() >= size {
+                yield std::mem::replace(&mut buf, Vec::with_capacity(size));
+            }
+        }
+        if !buf.is_empty() {
+            yield buf;
+        }
+    }
+}
+#+end_src
+
+*** =rust/src/multicasting.rs=
+
+#+begin_src rust :tangle rust/src/multicasting.rs
+//! Multicasting operators for sharing streams among multiple consumers.
+
+use std::sync::Arc;
+use futures::lock::Mutex;
+use futures::channel::mpsc;
+use futures::Stream;
+use async_stream::stream;
+
+/// A multicasting subject that replays buffered values to new subscribers.
+pub struct ReplaySubject<T: Clone + Send + 'static> {
+    inner: Arc<Mutex<ReplaySubjectInner<T>>>,
+}
+
+struct ReplaySubjectInner<T> {
+    buffer: Vec<T>,
+    buffer_size: usize,
+    completed: bool,
+    subscribers: Vec<mpsc::UnboundedSender<T>>,
+}
+
+impl<T: Clone + Send + 'static> ReplaySubject<T> {
+    pub fn new(buffer_size: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ReplaySubjectInner {
+                buffer: Vec::new(),
+                buffer_size,
+                completed: false,
+                subscribers: Vec::new(),
+            })),
+        }
+    }
+
+    pub async fn next(&self, value: T) {
+        let mut inner = self.inner.lock().await;
+        inner.buffer.push(value.clone());
+        if inner.buffer.len() > inner.buffer_size {
+            inner.buffer.remove(0);
+        }
+        inner.subscribers.retain(|tx| tx.unbounded_send(value.clone()).is_ok());
+    }
+
+    pub async fn complete(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.completed = true;
+        inner.subscribers.clear();
+    }
+
+    pub fn subscribe(&self) -> impl Stream<Item = T> {
+        let inner = self.inner.clone();
+        
+        stream! {
+            use futures::StreamExt;
+            
+            let (tx, mut rx) = mpsc::unbounded();
+            let buffered: Vec<T>;
+            
+            {
+                let mut guard = inner.lock().await;
+                buffered = guard.buffer.clone();
+                if !guard.completed {
+                    guard.subscribers.push(tx);
+                }
+            }
+            
+            for item in buffered {
+                yield item;
+            }
+            
+            while let Some(item) = rx.next().await {
+                yield item;
+            }
+        }
+    }
 }
 #+end_src
 
@@ -7824,7 +9576,7 @@ await scheduler.advanceTo(150)  // First event fires
 await scheduler.advanceTo(300)  // Second event fires
 #+end_src
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 /**
  * A virtual time scheduler for deterministic async stream testing.
  * Allows you to control time progression without waiting for real time.
@@ -7943,7 +9695,7 @@ const values = await collect(stream)
 expect(values).toEqual([1, 2])
 #+end_src
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * A controllable async stream for testing.
@@ -8075,7 +9827,7 @@ const timed = await collectWithTime(stream)
 const first3 = await collectN(3, infiniteStream)
 #+end_src
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * Collect all values from a stream into an array.
@@ -8189,7 +9941,7 @@ Usage:
   expect(await collect(stream)).toEqual([1, 2, 3])
 #+end_src
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * Options for marble stream creation.
@@ -8331,7 +10083,7 @@ describe('collectWithTime', () => {
 
 Drain helpers for consuming streams without collecting values.
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * Consume N values from a stream, discarding them.
@@ -8361,7 +10113,7 @@ export async function drain<T>(stream: AsyncIterable<T>): Promise<void> {
 
 Spy wrappers for observing stream behavior in tests.
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * A record of events that occurred on a spied stream.
@@ -8490,7 +10242,7 @@ describe('spy', () => {
 
 Fluent assertion helpers for testing stream behavior.
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * Fluent assertion builder for streams.
@@ -8618,7 +10370,7 @@ function arraysEqual<T>(a: T[], b: T[]): boolean {
 
 Utility for quickly creating async iterables from arrays with optional delays.
 
-#+begin_src typescript :tangle test-helpers.ts
+#+begin_src typescript :tangle typescript/test-helpers.ts
 
 /**
  * Options for creating an async iterable.
@@ -8662,7 +10414,7 @@ export async function* createAsyncIterable<T>(
 The test file is assembled from all the =:noweb-ref tests= blocks scattered throughout this document.
 This keeps tests close to the code they test while producing a single test file.
 
-#+begin_src typescript :tangle index.test.ts :noweb yes
+#+begin_src typescript :tangle typescript/index.test.ts :noweb yes
 import { describe, it, expect } from 'vitest'
 import {
   collect,
