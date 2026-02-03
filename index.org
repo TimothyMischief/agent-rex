@@ -678,13 +678,18 @@ describe('from', () => {
 
 *** Rust Implementation
 
-Rust uses =futures::stream::iter= for sync iterables and =async_stream= for async:
+Rust uses =futures::stream::iter= for sync iterables. We re-export it as =from_iter= for API consistency:
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Creates a stream from an iterator.
-pub fn from_iter<T, I: IntoIterator<Item = T>>(iterable: I) -> impl Stream<Item = T> {
-  futures::stream::iter(iterable)
-}
+/// 
+/// # Note
+/// This is an alias for `futures::stream::iter`. Prefer using the built-in directly:
+/// ```rust
+/// use futures::stream;
+/// let s = stream::iter(vec![1, 2, 3]);
+/// ```
+pub use futures::stream::iter as from_iter;
 #+end_src
 
 **** Tests
@@ -893,9 +898,14 @@ describe('empty', () => {
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Creates a stream that immediately completes without emitting any values.
-pub fn empty<T>() -> impl Stream<Item = T> {
-  stream::empty()
-}
+/// 
+/// # Note
+/// This is an alias for `futures::stream::empty`. Prefer using the built-in directly:
+/// ```rust
+/// use futures::stream;
+/// let s: futures::stream::Empty<i32> = stream::empty();
+/// ```
+pub use futures::stream::empty;
 #+end_src
 
 **** Tests
@@ -981,9 +991,14 @@ describe('never', () => {
 
 #+begin_src rust :tangle rust/src/lib.rs
 /// Creates a stream that never emits any values and never completes.
-pub fn never<T>() -> impl Stream<Item = T> {
-  futures::stream::pending()
-}
+/// 
+/// # Note
+/// This is an alias for `futures::stream::pending`. Prefer using the built-in directly:
+/// ```rust
+/// use futures::stream;
+/// let s: futures::stream::Pending<i32> = stream::pending();
+/// ```
+pub use futures::stream::pending as never;
 #+end_src
 
 **** Tests
@@ -1956,15 +1971,22 @@ describe('map', () => {
 
 *** Rust Implementation
 
-The =StreamExt::map= method is built-in to futures:
+=StreamExt::map= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
-/// Map is built-in to StreamExt:
-/// stream.map(|x| x * 2)
-
-// For async mappers, use then():
-/// stream.then(|x| async move { x * 2 })
-
+/// Maps each value in a stream using a function.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::map()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.map(|x| x * 2);
+/// ```
+/// For async mappers, use `StreamExt::then()`:
+/// ```rust,ignore
+/// let result = stream.then(|x| async move { x * 2 });
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn map<T, U, S, F>(s: S, f: F) -> impl Stream<Item = U>
 where
   S: Stream<Item = T>,
@@ -3020,10 +3042,20 @@ describe('filter', () => {
 
 *** Rust Implementation
 
-=StreamExt::filter= is built-in:
+=StreamExt::filter= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
 // Filtering Operators
+
+/// Filters values in a stream based on a predicate.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::filter()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.filter(|x| futures::future::ready(*x > 2));
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn filter<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
 where
   S: Stream<Item = T>,
@@ -3397,10 +3429,20 @@ describe('take', () => {
 
 *** Rust Implementation
 
-=StreamExt::take= is built-in:
+=StreamExt::take= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
 // Slicing Operators
+
+/// Takes the first `n` values from a stream.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::take()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.take(5);
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn take<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
   stream! {
     futures::pin_mut!(s);
@@ -3522,11 +3564,18 @@ describe('skip', () => {
 
 *** Rust Implementation
 
-=StreamExt::skip= is built-in:
+=StreamExt::skip= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
-// Built-in: stream.skip(n)
-
+/// Skips the first `n` values from a stream.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::skip()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.skip(2);
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn skip<T, S: Stream<Item = T>>(n: usize, s: S) -> impl Stream<Item = T> {
   stream! {
     futures::pin_mut!(s);
@@ -3782,9 +3831,18 @@ describe('takeWhile', () => {
 
 *** Rust Implementation
 
-=StreamExt::take_while= is built-in:
+=StreamExt::take_while= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
+/// Takes values from a stream while the predicate returns true.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::take_while()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.take_while(|x| futures::future::ready(*x < 5));
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn take_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
 where
   S: Stream<Item = T>,
@@ -3910,9 +3968,18 @@ describe('skipWhile', () => {
 
 *** Rust Implementation
 
-=StreamExt::skip_while= is built-in:
+=StreamExt::skip_while= is built-in. This standalone function is provided for pipe-style composition:
 
 #+begin_src rust :tangle rust/src/lib.rs
+/// Skips values from a stream while the predicate returns true.
+/// 
+/// # Note
+/// Prefer using the built-in `StreamExt::skip_while()` method when chaining:
+/// ```rust,ignore
+/// use futures::StreamExt;
+/// let result = stream.skip_while(|x| futures::future::ready(*x < 3));
+/// ```
+/// This standalone function is provided for functional/pipe-style composition.
 pub fn skip_while<T, S, P>(predicate: P, s: S) -> impl Stream<Item = T>
 where
   S: Stream<Item = T>,
@@ -5653,25 +5720,28 @@ describe('merge', () => {
 
 *** Rust Implementation
 
-The =futures= crate provides built-in merge functionality that is runtime-agnostic:
+The =futures= crate provides built-in merge functionality that is runtime-agnostic. We re-export these as =merge= and =merge_all= for API consistency:
 
 #+begin_src rust :tangle rust/src/lib.rs
-// Preferred: Use futures::stream::select for two streams (runtime-agnostic)
-pub fn merge<T, S1, S2>(s1: S1, s2: S2) -> impl Stream<Item = T>
-where
-  S1: Stream<Item = T>,
-  S2: Stream<Item = T>,
-{
-  stream::select(s1, s2)
-}
+/// Merge two streams, interleaving values as they arrive.
+/// 
+/// # Note
+/// This is an alias for `futures::stream::select`. Prefer using the built-in directly:
+/// ```rust,ignore
+/// use futures::stream;
+/// let merged = stream::select(s1, s2);
+/// ```
+pub use futures::stream::select as merge;
 
-// For multiple streams, use select_all (runtime-agnostic)
-pub fn merge_all<T, S>(streams: Vec<S>) -> impl Stream<Item = T>
-where
-  S: Stream<Item = T> + Unpin,
-{
-  stream::select_all(streams)
-}
+/// Merge multiple streams, interleaving values as they arrive.
+/// 
+/// # Note
+/// This is an alias for `futures::stream::select_all`. Prefer using the built-in directly:
+/// ```rust,ignore
+/// use futures::stream;
+/// let merged = stream::select_all(streams);
+/// ```
+pub use futures::stream::select_all as merge_all;
 #+end_src
 
 **** Tests
