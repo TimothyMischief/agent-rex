@@ -404,7 +404,8 @@ let delayed = delay::<TokioRuntime, _, _>(stream, Duration::from_millis(100));
 let debounced = debounce::<TokioRuntime, _, _>(stream, Duration::from_millis(300));
 
 // Multicasting requires spawning
-let shared = replay::<TokioRuntime, _, _>(10, source);#+end_src
+let shared = replay::<TokioRuntime, _, _>(10, source);
+#+end_src
 
 * Creating a Stream
 
