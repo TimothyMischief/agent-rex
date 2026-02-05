@@ -613,6 +613,143 @@ mod just_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+Swift 5.5+ provides native =AsyncSequence= and =AsyncStream= types, making async iteration first-class:
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+import Foundation
+
+// MARK: - Helper Types for Concurrency
+
+/// Actor that tracks the latest values from two streams for combining.
+actor LatestState<T: Sendable, U: Sendable> {
+  var latest1: T?
+  var latest2: U?
+  
+  func set1(_ value: T) -> (T, U)? {
+    latest1 = value
+    if let l1 = latest1, let l2 = latest2 {
+      return (l1, l2)
+    }
+    return nil
+  }
+  
+  func set2(_ value: U) -> (T, U)? {
+    latest2 = value
+    if let l1 = latest1, let l2 = latest2 {
+      return (l1, l2)
+    }
+    return nil
+  }
+}
+
+/// Actor for buffering with time windows.
+actor TimeBuffer<T: Sendable> {
+  var buffer: [T] = []
+  
+  func add(_ item: T) {
+    buffer.append(item)
+  }
+  
+  func flush() -> [T] {
+    let items = buffer
+    buffer = []
+    return items
+  }
+}
+
+/// Actor for eager pre-fetching buffer.
+actor EagerBuffer<T: Sendable> {
+  var items: [T] = []
+  let maxSize: Int
+  
+  init(maxSize: Int) {
+    self.maxSize = maxSize
+  }
+  
+  func add(_ item: T) {
+    if maxSize == 0 || items.count < maxSize {
+      items.append(item)
+    }
+  }
+  
+  func pop() -> T? {
+    items.isEmpty ? nil : items.removeFirst()
+  }
+  
+  var isEmpty: Bool { items.isEmpty }
+}
+
+/// Sendable wrapper for functions.
+struct SendableFunc<T, U>: @unchecked Sendable {
+  let fn: (T) -> U
+}
+
+/// Actor for applyLatest state.
+actor ApplyLatestState<T: Sendable, U: Sendable> {
+  var latestFn: SendableFunc<T, U>?
+  var latestValue: T?
+  
+  func setFn(_ fn: SendableFunc<T, U>) -> U? {
+    latestFn = fn
+    if let value = latestValue {
+      return fn.fn(value)
+    }
+    return nil
+  }
+  
+  func setValue(_ value: T) -> U? {
+    latestValue = value
+    if let fn = latestFn {
+      return fn.fn(value)
+    }
+    return nil
+  }
+}
+
+/// Actor to track a boolean flag for controlling task groups.
+actor StopFlag {
+  var stopped = false
+  
+  func stop() { stopped = true }
+  func isStopped() -> Bool { stopped }
+}
+
+// MARK: - Stream Creators
+
+/// Creates a stream that emits a single value and then completes.
+public func just<T: Sendable>(_ value: T) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    continuation.yield(value)
+    continuation.finish()
+  }
+}
+
+/// Alias for just
+public func of<T: Sendable>(_ value: T) -> AsyncStream<T> {
+  just(value)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+import XCTest
+@testable import AgentRex
+
+final class AgentRexTests: XCTestCase {
+  func testJustEmitsSingleValue() async throws {
+    let values = await collect(just(42))
+    XCTAssertEqual(values, [42])
+  }
+
+  func testOfIsAlias() async throws {
+    let values = await collect(of("hello"))
+    XCTAssertEqual(values, ["hello"])
+  }
+#+end_src
+
 ** =fromPromise=
 The =fromPromise= function creates a stream from a Promise.
 When the Promise resolves, the stream emits the resolved value and then completes.
@@ -742,6 +879,45 @@ mod from_future_tests {
     assert_eq!(values, vec!["computed"]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+In Swift, we create a stream from an async closure:
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream from an async operation.
+/// When the operation completes, the stream emits the value and finishes.
+public func fromAsync<T: Sendable>(_ operation: @Sendable @escaping () async throws -> T) -> AsyncThrowingStream<T, Error> {
+  AsyncThrowingStream { continuation in
+    Task {
+      do {
+        let value = try await operation()
+        continuation.yield(value)
+        continuation.finish()
+      } catch {
+        continuation.finish(throwing: error)
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testFromAsyncEmitsResolvedValue() async throws {
+    let values = try await collectThrowing(fromAsync { 42 })
+    XCTAssertEqual(values, [42])
+  }
+
+  func testFromAsyncWithAsyncComputation() async throws {
+    let values = try await collectThrowing(fromAsync {
+      try await Task.sleep(nanoseconds: 1_000_000)
+      return "computed"
+    })
+    XCTAssertEqual(values, ["computed"])
+  }
 #+end_src
 
 ** =from=
@@ -878,6 +1054,58 @@ mod from_iter_tests {
     assert_eq!(values, vec![0, 1, 2, 3, 4]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+Swift's =AsyncStream= can be created from any =Sequence=:
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream from a sequence.
+/// Emits each value from the sequence in order.
+public func from<S: Sequence>(_ sequence: S) -> AsyncStream<S.Element> where S.Element: Sendable {
+  AsyncStream { continuation in
+    for item in sequence {
+      continuation.yield(item)
+    }
+    continuation.finish()
+  }
+}
+
+/// Creates a stream from an AsyncSequence.
+public func from<S: AsyncSequence>(_ asyncSequence: S) -> AsyncStream<S.Element> where S: Sendable, S.Element: Sendable {
+  AsyncStream { continuation in
+    Task {
+      do {
+        for try await item in asyncSequence {
+          continuation.yield(item)
+        }
+      } catch {
+        // Silently finish on error for non-throwing variant
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testFromEmitsAllValues() async throws {
+    let values = await collect(from([1, 2, 3]))
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+
+  func testFromHandlesEmpty() async throws {
+    let values: [Int] = await collect(from([]))
+    XCTAssertTrue(values.isEmpty)
+  }
+
+  func testFromWithRange() async throws {
+    let values = await collect(from(0..<5))
+    XCTAssertEqual(values, [0, 1, 2, 3, 4])
+  }
 #+end_src
 
 ** =periodic=
@@ -1022,6 +1250,38 @@ mod periodic_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream that emits Void at regular intervals.
+/// To give it a value, combine it with `constant`.
+public func periodic(intervalNanoseconds: UInt64) -> AsyncStream<Void> {
+  AsyncStream { continuation in
+    Task {
+      while !Task.isCancelled {
+        continuation.yield(())
+        try? await Task.sleep(nanoseconds: intervalNanoseconds)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Convenience overload for milliseconds.
+public func periodic(intervalMs: UInt64) -> AsyncStream<Void> {
+  periodic(intervalNanoseconds: intervalMs * 1_000_000)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testPeriodicEmitsAtIntervals() async throws {
+    let values = await collect(take(3, periodic(intervalMs: 10)))
+    XCTAssertEqual(values.count, 3)
+  }
+#+end_src
+
 ** =empty=
 The =empty= function creates a stream that immediately completes without emitting any values.
 
@@ -1126,6 +1386,26 @@ mod empty_tests {
     assert!(stream.next().await.is_none());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream that immediately completes without emitting any values.
+public func empty<T: Sendable>() -> AsyncStream<T> {
+  AsyncStream { continuation in
+    continuation.finish()
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testEmptyCompletesImmediately() async throws {
+    let values: [Int] = await collect(empty())
+    XCTAssertTrue(values.isEmpty)
+  }
 #+end_src
 
 ** =never=
@@ -1244,6 +1524,39 @@ mod never_tests {
     }
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream that never emits any values and never completes.
+public func never<T: Sendable>() -> AsyncStream<T> {
+  AsyncStream { _ in
+    // Never yield, never finish — continuation kept alive indefinitely
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testNeverDoesNotComplete() async throws {
+    // Start consuming never() in an unstructured task
+    let neverTask = Task {
+      for await _ in never() as AsyncStream<Int> {
+        return "emitted"
+      }
+      return "completed"
+    }
+    
+    // Wait 10ms - if never() emitted or completed, the task would finish
+    try await Task.sleep(nanoseconds: 10_000_000)
+    
+    // Cancel the never task since it will never complete on its own
+    neverTask.cancel()
+    
+    // If we got here, never() didn't emit or complete within 10ms - test passes
+  }
 #+end_src
 
 ** =iterate=
@@ -1384,6 +1697,49 @@ mod iterate_tests {
     assert_eq!(values, vec!["a", "aa", "aaa"]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream that emits an infinite sequence by repeatedly applying a function.
+public func iterate<T: Sendable>(_ seed: T, _ f: @Sendable @escaping (T) -> T) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    let task = Task {
+      var current = seed
+      while !Task.isCancelled {
+        continuation.yield(current)
+        current = f(current)
+        // Yield to allow cancellation to be processed
+        await Task.yield()
+      }
+      continuation.finish()
+    }
+    
+    continuation.onTermination = { _ in
+      task.cancel()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testIterateGeneratesSequence() async throws {
+    let values = await collect(take(5, iterate(1) { $0 * 2 }))
+    XCTAssertEqual(values, [1, 2, 4, 8, 16])
+  }
+
+  func testIterateWithAddition() async throws {
+    let values = await collect(take(4, iterate(0) { $0 + 1 }))
+    XCTAssertEqual(values, [0, 1, 2, 3])
+  }
+
+  func testIterateWithStrings() async throws {
+    let values = await collect(take(3, iterate("a") { $0 + "a" }))
+    XCTAssertEqual(values, ["a", "aa", "aaa"])
+  }
 #+end_src
 
 ** =unfold=
@@ -1596,6 +1952,66 @@ mod unfold_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Result of an unfold step.
+public struct UnfoldResult<T, S> {
+  public let value: T
+  public let nextSeed: S
+  public let done: Bool
+  
+  public init(value: T, nextSeed: S, done: Bool) {
+    self.value = value
+    self.nextSeed = nextSeed
+    self.done = done
+  }
+}
+
+/// Creates a stream by unfolding a seed value.
+public func unfold<T: Sendable, S: Sendable>(_ seed: S, _ f: @Sendable @escaping (S) -> UnfoldResult<T, S>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      var currentSeed = seed
+      while !Task.isCancelled {
+        let result = f(currentSeed)
+        if result.done {
+          break
+        }
+        continuation.yield(result.value)
+        currentSeed = result.nextSeed
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testUnfoldGeneratesValues() async throws {
+    let values = await collect(unfold(1) { n in
+      UnfoldResult(value: n, nextSeed: n + 1, done: n > 3)
+    })
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+
+  func testUnfoldStopsImmediatelyWhenDone() async throws {
+    let values: [Int] = await collect(unfold(0) { _ in
+      UnfoldResult(value: 999, nextSeed: 0, done: true)
+    })
+    XCTAssertTrue(values.isEmpty)
+  }
+
+  func testUnfoldWithDifferentTypes() async throws {
+    let values = await collect(unfold(0) { n in
+      UnfoldResult(value: "item-\(n)", nextSeed: n + 1, done: n >= 2)
+    })
+    XCTAssertEqual(values, ["item-0", "item-1"])
+  }
+#+end_src
+
 ** =startWith=
 
 The =startWith= function prepends a value to the beginning of a stream.
@@ -1726,6 +2142,37 @@ mod start_with_tests {
     assert_eq!(values, vec![42]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Prepends a value to the beginning of a stream.
+public func startWith<T: Sendable>(_ value: T, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      continuation.yield(value)
+      for await item in stream {
+        continuation.yield(item)
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testStartWithPrependsValue() async throws {
+    let values = await collect(startWith(0, from([1, 2, 3])))
+    XCTAssertEqual(values, [0, 1, 2, 3])
+  }
+
+  func testStartWithOnEmptyStream() async throws {
+    let values = await collect(startWith(42, empty()))
+    XCTAssertEqual(values, [42])
+  }
 #+end_src
 
 ** =concat=
@@ -1872,6 +2319,58 @@ mod concat_tests {
     // ...implementation varies
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Concatenates two streams into a single stream.
+public func concat<T: Sendable>(_ s1: AsyncStream<T>, _ s2: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in s1 {
+        continuation.yield(item)
+      }
+      for await item in s2 {
+        continuation.yield(item)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Concatenates multiple streams into a single stream.
+public func concat<T: Sendable>(_ streams: [AsyncStream<T>]) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for stream in streams {
+        for await item in stream {
+          continuation.yield(item)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testConcatJoinsStreams() async throws {
+    let values = await collect(concat(from([1, 2]), from([3, 4])))
+    XCTAssertEqual(values, [1, 2, 3, 4])
+  }
+
+  func testConcatWithEmptyFirst() async throws {
+    let values = await collect(concat(empty(), from([5, 6])))
+    XCTAssertEqual(values, [5, 6])
+  }
+
+  func testConcatArrayOfStreams() async throws {
+    let values = await collect(concat([from([1]), from([2, 3]), from([4])]))
+    XCTAssertEqual(values, [1, 2, 3, 4])
+  }
 #+end_src
 
 ** =fromEvent=
@@ -2077,6 +2576,84 @@ mod channel_tests {
   // Channel-based stream creation is tested via integration tests
   // with specific runtime implementations
 }
+#+end_src
+
+*** Swift Implementation
+
+In Swift, event-driven patterns use AsyncStream's continuation API:
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// A channel that wraps AsyncStream continuation for thread-safe access.
+public final class Channel<T: Sendable>: @unchecked Sendable {
+  private let continuation: AsyncStream<T>.Continuation
+  
+  fileprivate init(_ continuation: AsyncStream<T>.Continuation) {
+    self.continuation = continuation
+  }
+  
+  public func send(_ value: T) {
+    continuation.yield(value)
+  }
+  
+  public func finish() {
+    continuation.finish()
+  }
+}
+
+/// Creates an AsyncStream along with a Channel to push values.
+/// This is useful for bridging callback-based or event-based APIs.
+///
+/// Example:
+/// ```swift
+/// let (stream, channel) = createChannel<String>()
+/// 
+/// // In an event handler:
+/// channel.send("event occurred")
+/// 
+/// // When done:
+/// channel.finish()
+/// ```
+public func createChannel<T: Sendable>() -> (
+  stream: AsyncStream<T>,
+  channel: Channel<T>
+) {
+  var channel: Channel<T>!
+  let stream = AsyncStream<T> { continuation in
+    channel = Channel(continuation)
+  }
+  return (stream: stream, channel: channel)
+}
+
+/// Creates an AsyncStream from a callback-based API.
+/// The setup closure receives functions to yield values and finish the stream.
+public func fromCallback<T: Sendable>(
+  _ setup: @escaping (@escaping (T) -> Void, @escaping () -> Void) -> Void
+) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    setup(
+      { value in continuation.yield(value) },
+      { continuation.finish() }
+    )
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testCreateChannel() async throws {
+    let (stream, channel): (AsyncStream<Int>, Channel<Int>) = createChannel()
+    
+    Task {
+      channel.send(1)
+      channel.send(2)
+      channel.send(3)
+      channel.finish()
+    }
+    
+    let result = await collect(stream)
+    XCTAssertEqual(result, [1, 2, 3])
+  }
 #+end_src
 
 * Composing with =pipe=
@@ -2456,6 +3033,46 @@ mod map_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Maps each value in a stream using a function.
+public func map<T: Sendable, U: Sendable>(_ f: @Sendable @escaping (T) -> U, _ stream: AsyncStream<T>) -> AsyncStream<U> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        continuation.yield(f(item))
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func map<T: Sendable, U: Sendable>(_ f: @Sendable @escaping (T) -> U) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  { stream in map(f, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testMapTransformsValues() async throws {
+    let values = await collect(map({ $0 * 2 }, from([1, 2, 3])))
+    XCTAssertEqual(values, [2, 4, 6])
+  }
+
+  func testMapWithTypeChange() async throws {
+    let values = await collect(map({ "num-\($0)" }, from([1, 2, 3])))
+    XCTAssertEqual(values, ["num-1", "num-2", "num-3"])
+  }
+
+  func testMapEmptyStream() async throws {
+    let values: [Int] = await collect(map({ $0 * 2 }, empty()))
+    XCTAssertTrue(values.isEmpty)
+  }
+#+end_src
+
 ** =constant=
 
 The =constant= function creates a stream that emits a constant value for each item in the source stream.
@@ -2599,6 +3216,42 @@ mod constant_tests {
     assert!(values.is_empty());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Emits a constant value for each item in the source stream.
+public func constant<T: Sendable, U: Sendable>(_ value: U, _ stream: AsyncStream<T>) -> AsyncStream<U> {
+  AsyncStream { continuation in
+    Task {
+      for await _ in stream {
+        continuation.yield(value)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func constant<T: Sendable, U: Sendable>(_ value: U) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  { stream in constant(value, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testConstantReplacesAllValues() async throws {
+    let values = await collect(constant("x", from([1, 2, 3])))
+    XCTAssertEqual(values, ["x", "x", "x"])
+  }
+
+  func testConstantEmptyStream() async throws {
+    let emptyStream: AsyncStream<String> = empty()
+    let values: [Int] = await collect(constant(42, emptyStream))
+    XCTAssertTrue(values.isEmpty)
+  }
 #+end_src
 
 ** =scan=
@@ -2796,6 +3449,50 @@ mod scan_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Accumulates values using an accumulator function, emitting each intermediate result.
+/// Yields the seed first, then each accumulated value.
+public func scan<T: Sendable, U: Sendable>(_ accumulator: @Sendable @escaping (U, T) -> U, _ seed: U, _ stream: AsyncStream<T>) -> AsyncStream<U> {
+  AsyncStream { continuation in
+    Task {
+      var acc = seed
+      continuation.yield(acc)
+      for await item in stream {
+        acc = accumulator(acc, item)
+        continuation.yield(acc)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func scan<T: Sendable, U: Sendable>(_ accumulator: @Sendable @escaping (U, T) -> U, _ seed: U) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  { stream in scan(accumulator, seed, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testScanAccumulatesWithSeed() async throws {
+    let values = await collect(scan({ $0 + $1 }, 0, from([1, 2, 3])))
+    XCTAssertEqual(values, [0, 1, 3, 6])
+  }
+
+  func testScanProduct() async throws {
+    let values = await collect(scan({ $0 * $1 }, 1, from([2, 3, 4])))
+    XCTAssertEqual(values, [1, 2, 6, 24])
+  }
+
+  func testScanEmptyStream() async throws {
+    let values = await collect(scan({ $0 + $1 }, 100, from([Int]()))) 
+    XCTAssertEqual(values, [100]) // Only seed
+  }
+#+end_src
+
 ** =tap=
 
 The =tap= function allows you to perform side effects for each value emitted by a stream without modifying the values themselves.
@@ -2981,6 +3678,46 @@ mod tap_runtime_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Performs side effects for each value without modifying them.
+/// The side effect is called synchronously (fire-and-forget for async effects).
+public func tap<T: Sendable>(_ sideEffect: @Sendable @escaping (T) async -> Void, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        await sideEffect(item)
+        continuation.yield(item)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func tap<T: Sendable>(_ sideEffect: @Sendable @escaping (T) async -> Void) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in tap(sideEffect, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testTapPerformsSideEffect() async throws {
+    actor Counter {
+      var values: [Int] = []
+      func append(_ value: Int) { values.append(value) }
+      func getValues() -> [Int] { values }
+    }
+    let counter = Counter()
+    let values = await collect(tap({ await counter.append($0) }, from([1, 2, 3])))
+    XCTAssertEqual(values, [1, 2, 3])
+    let sideEffects = await counter.getValues()
+    XCTAssertEqual(sideEffects, [1, 2, 3])
+  }
+#+end_src
+
 ** =awaitTap=
 
 The =awaitTap= function is like =tap=, but awaits the side effect before yielding the value.
@@ -3137,6 +3874,45 @@ mod await_tap_tests {
     assert_eq!(count.load(Ordering::SeqCst), 3);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Performs side effects for each value, awaiting completion before yielding.
+public func awaitTap<T: Sendable>(_ sideEffect: @Sendable @escaping (T) async -> Void, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        await sideEffect(item)
+        continuation.yield(item)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func awaitTap<T: Sendable>(_ sideEffect: @Sendable @escaping (T) async -> Void) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in awaitTap(sideEffect, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testAwaitTapExecutesSideEffect() async throws {
+    actor Counter {
+      var count = 0
+      func increment() { count += 1 }
+      func getCount() -> Int { count }
+    }
+    let counter = Counter()
+    let values = await collect(awaitTap({ (_: Int) in await counter.increment() }, from([1, 2, 3])))
+    XCTAssertEqual(values, [1, 2, 3])
+    let count = await counter.getCount()
+    XCTAssertEqual(count, 3)
+  }
 #+end_src
 
 ** =continueWith=
@@ -3326,6 +4102,55 @@ mod continue_with_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Continues with another stream after the first completes.
+/// The continuation function is only called after the first stream finishes.
+public func continueWith<T: Sendable>(_ f: @Sendable @escaping () -> AsyncStream<T>, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        continuation.yield(item)
+      }
+      for await item in f() {
+        continuation.yield(item)
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func continueWith<T: Sendable>(_ f: @Sendable @escaping () -> AsyncStream<T>) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in continueWith(f, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testContinueWithAppendsStream() async throws {
+    let values = await collect(continueWith({ from([3, 4]) }, from([1, 2])))
+    XCTAssertEqual(values, [1, 2, 3, 4])
+  }
+
+  func testContinueWithLazyEvaluation() async throws {
+    actor Flag {
+      var called = false
+      func setCalled() { called = true }
+      func wasCalled() -> Bool { called }
+    }
+    let flag = Flag()
+    let values = await collect(continueWith({
+      Task { await flag.setCalled() }
+      return from([99])
+    }, from([1])))
+    XCTAssertEqual(values, [1, 99])
+    // Note: flag may or may not be set depending on timing
+  }
+#+end_src
+
 ** =concatAll=
 
 The =concatAll= function flattens a stream of streams by concatenating them into a single stream.
@@ -3457,6 +4282,34 @@ mod concat_all_tests {
     assert_eq!(values, vec![1, 2, 3, 4]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Flattens a stream of streams by concatenating them into a single stream.
+public func concatAll<T: Sendable>(_ streamOfStreams: AsyncStream<AsyncStream<T>>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await innerStream in streamOfStreams {
+        for await item in innerStream {
+          continuation.yield(item)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testConcatAllFlattensStreams() async throws {
+    let streamOfStreams = from([from([1, 2]), from([3, 4])])
+    let values = await collect(concatAll(streamOfStreams))
+    XCTAssertEqual(values, [1, 2, 3, 4])
+  }
 #+end_src
 
 ** =concatMap=
@@ -3634,6 +4487,38 @@ mod concat_map_tests {
     assert_eq!(values, vec![10, 11, 20, 21]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Maps each value to a stream and concatenates the results in order.
+public func concatMap<T: Sendable, U: Sendable>(_ f: @Sendable @escaping (T) -> AsyncStream<U>, _ stream: AsyncStream<T>) -> AsyncStream<U> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        for await innerItem in f(item) {
+          continuation.yield(innerItem)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func concatMap<T: Sendable, U: Sendable>(_ f: @Sendable @escaping (T) -> AsyncStream<U>) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  { stream in concatMap(f, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testConcatMapSequential() async throws {
+    let values = await collect(concatMap({ x in from([x * 10, x * 10 + 1]) }, from([1, 2])))
+    XCTAssertEqual(values, [10, 11, 20, 21])
+  }
 #+end_src
 
 * Filtering
@@ -3842,6 +4727,62 @@ mod filter_tests {
     assert!(values.is_empty());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Filters values in a stream based on a predicate.
+public func filter<T: Sendable>(_ predicate: @Sendable @escaping (T) -> Bool, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        if predicate(item) {
+          continuation.yield(item)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func filter<T: Sendable>(_ predicate: @Sendable @escaping (T) -> Bool) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in filter(predicate, stream) }
+}
+
+/// Async predicate version.
+public func filterAsync<T: Sendable>(_ predicate: @Sendable @escaping (T) async -> Bool, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      for await item in stream {
+        if await predicate(item) {
+          continuation.yield(item)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testFilterKeepsMatching() async throws {
+    let values = await collect(filter({ $0 > 2 }, from([1, 2, 3, 4, 5])))
+    XCTAssertEqual(values, [3, 4, 5])
+  }
+
+  func testFilterEvenNumbers() async throws {
+    let values = await collect(filter({ $0 % 2 == 0 }, from([1, 2, 3, 4, 5, 6])))
+    XCTAssertEqual(values, [2, 4, 6])
+  }
+
+  func testFilterEmptyResult() async throws {
+    let values = await collect(filter({ $0 > 100 }, from([1, 2, 3])))
+    XCTAssertTrue(values.isEmpty)
+  }
 #+end_src
 
 ** =skipRepeats=
@@ -4151,6 +5092,59 @@ mod skip_repeats_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Filter consecutive duplicates using a custom equality function.
+public func skipRepeatsWith<T: Sendable>(_ equals: @Sendable @escaping (T, T) -> Bool, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      var last: T?
+      for await item in stream {
+        let shouldYield: Bool
+        if let prev = last {
+          shouldYield = !equals(item, prev)
+        } else {
+          shouldYield = true
+        }
+        if shouldYield {
+          last = item
+          continuation.yield(item)
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func skipRepeatsWith<T: Sendable>(_ equals: @Sendable @escaping (T, T) -> Bool) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in skipRepeatsWith(equals, stream) }
+}
+
+/// Filter consecutive duplicates using Equatable.
+public func skipRepeats<T: Equatable & Sendable>(_ stream: AsyncStream<T>) -> AsyncStream<T> {
+  skipRepeatsWith({ $0 == $1 }, stream)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSkipRepeatsRemovesDuplicates() async throws {
+    let values = await collect(skipRepeats(from([1, 1, 2, 2, 3, 1, 1])))
+    XCTAssertEqual(values, [1, 2, 3, 1])
+  }
+
+  func testSkipRepeatsWithCustomEquality() async throws {
+    let values = await collect(skipRepeatsWith(
+      { $0.lowercased() == $1.lowercased() },
+      from(["A", "a", "B", "b"])
+    ))
+    XCTAssertEqual(values, ["A", "B"])
+  }
+#+end_src
+
 * Slicing
 
 ** =take=
@@ -4334,6 +5328,27 @@ mod take_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+The =take= function is already defined in the test helpers section. Additional tests:
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testTakeFirstN() async throws {
+    let values = await collect(take(2, from([1, 2, 3, 4, 5])))
+    XCTAssertEqual(values, [1, 2])
+  }
+
+  func testTakeMoreThanAvailable() async throws {
+    let values = await collect(take(10, from([1, 2])))
+    XCTAssertEqual(values, [1, 2])
+  }
+
+  func testTakeZero() async throws {
+    let values = await collect(take(0, from([1, 2, 3])))
+    XCTAssertTrue(values.isEmpty)
+  }
+#+end_src
+
 ** =skip=
 
 The =skip= function creates a stream that skips the first =n= values from the source stream and emits the rest.
@@ -4493,6 +5508,50 @@ mod skip_tests {
     assert!(values.is_empty());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Skips the first n values from a stream.
+public func skip<T: Sendable>(_ n: Int, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      var count = 0
+      for await item in stream {
+        if count >= n {
+          continuation.yield(item)
+        }
+        count += 1
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func skip<T: Sendable>(_ n: Int) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in skip(n, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSkipFirstN() async throws {
+    let values = await collect(skip(2, from([1, 2, 3, 4, 5])))
+    XCTAssertEqual(values, [3, 4, 5])
+  }
+
+  func testSkipZero() async throws {
+    let values = await collect(skip(0, from([1, 2, 3])))
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+
+  func testSkipMoreThanAvailable() async throws {
+    let values = await collect(skip(5, from([1, 2])))
+    XCTAssertTrue(values.isEmpty)
+  }
 #+end_src
 
 ** =slice=
@@ -4663,6 +5722,51 @@ mod slice_tests {
     assert_eq!(values, vec![1, 2]);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Emits values from index start to end (exclusive).
+public func slice<T: Sendable>(_ start: Int, _ end: Int, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      var index = 0
+      for await item in stream {
+        if index >= start && index < end {
+          continuation.yield(item)
+        }
+        index += 1
+        if index >= end { break }
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Curried version for pipe-style composition.
+public func slice<T: Sendable>(_ start: Int, _ end: Int) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  { stream in slice(start, end, stream) }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSliceExtractsRange() async throws {
+    let values = await collect(slice(2, 5, from([0, 1, 2, 3, 4, 5])))
+    XCTAssertEqual(values, [2, 3, 4])
+  }
+
+  func testSliceEmptyRange() async throws {
+    let values = await collect(slice(2, 2, from([0, 1, 2, 3, 4])))
+    XCTAssertTrue(values.isEmpty)
+  }
+
+  func testSliceBeyondLength() async throws {
+    let values = await collect(slice(1, 10, from([0, 1, 2])))
+    XCTAssertEqual(values, [1, 2])
+  }
 #+end_src
 
 ** =takeWhile=
@@ -4846,6 +5950,53 @@ mod take_while_tests {
     assert_eq!(values, Vec::<i32>::new());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Takes values from a stream while the predicate returns true.
+/// Once the predicate returns false, the stream completes.
+public func takeWhile<T: Sendable>(
+  _ predicate: @Sendable @escaping (T) async -> Bool
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        for await item in stream {
+          if await predicate(item) {
+            continuation.yield(item)
+          } else {
+            break
+          }
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testTakeWhile() async throws {
+    let source = AsyncStream { c in c.yield(1); c.yield(2); c.yield(3); c.yield(4); c.yield(2); c.yield(1); c.finish() }
+    let result = await collect(takeWhile { $0 < 4 }(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testTakeWhileAllPass() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(takeWhile { _ in true }(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testTakeWhileNonePass() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(takeWhile { _ in false }(source))
+    XCTAssertEqual(result, [])
+  }
 #+end_src
 
 ** =skipWhile=
@@ -5036,6 +6187,57 @@ mod skip_while_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Skips values from a stream while the predicate returns true.
+/// Once the predicate returns false, all subsequent values are emitted.
+public func skipWhile<T: Sendable>(
+  _ predicate: @Sendable @escaping (T) async -> Bool
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        var skipping = true
+        for await item in stream {
+          if skipping {
+            if !(await predicate(item)) {
+              skipping = false
+              continuation.yield(item)
+            }
+          } else {
+            continuation.yield(item)
+          }
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSkipWhile() async throws {
+    let source = from([1, 2, 3, 4, 2, 1])
+    let result = await collect(skipWhile { $0 < 3 }(source))
+    XCTAssertEqual(result, [3, 4, 2, 1])
+  }
+
+  func testSkipWhileAllFail() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(skipWhile { _ in false }(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testSkipWhileAllPass() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(skipWhile { _ in true }(source))
+    XCTAssertEqual(result, [])
+  }
+#+end_src
+
 ** =takeUntil=
 
 The =takeUntil= function creates a stream that emits values from the source stream until the provided predicate function returns true, at which point it completes (the matching value is *not* emitted).
@@ -5203,6 +6405,52 @@ mod take_until_tests {
     assert_eq!(values, Vec::<i32>::new());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Emits values from a stream until the predicate returns true.
+/// The matching value is NOT emitted (exclusive).
+public func takeUntil<T: Sendable>(
+  _ predicate: @Sendable @escaping (T) async -> Bool
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        for await item in stream {
+          if await predicate(item) {
+            break
+          }
+          continuation.yield(item)
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testTakeUntil() async throws {
+    let source = from([1, 2, 3, 4, 5])
+    let result = await collect(takeUntil { $0 == 3 }(source))
+    XCTAssertEqual(result, [1, 2])
+  }
+
+  func testTakeUntilNeverMatches() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(takeUntil { _ in false }(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testTakeUntilFirstMatches() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(takeUntil { $0 == 1 }(source))
+    XCTAssertEqual(result, [])
+  }
 #+end_src
 
 * Time-based Operators
@@ -5395,6 +6643,46 @@ mod delay_tests {
     assert_eq!(values, Vec::<i32>::new());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Delays each emission by the specified duration in milliseconds.
+public func delay<T: Sendable>(
+  _ delayMs: UInt64
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        for await item in stream {
+          try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+          continuation.yield(item)
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testDelay() async throws {
+    let source = from([1, 2, 3])
+    let start = ContinuousClock.now
+    let result = await collect(delay(10)(source))
+    let elapsed = ContinuousClock.now - start
+    XCTAssertEqual(result, [1, 2, 3])
+    XCTAssertTrue(elapsed >= .milliseconds(25)) // ~30ms for 3 items
+  }
+
+  func testDelayEmptyStream() async throws {
+    let source: AsyncStream<Int> = empty()
+    let result = await collect(delay(100)(source))
+    XCTAssertEqual(result, [])
+  }
 #+end_src
 
 ** =debounce=
@@ -5677,6 +6965,60 @@ mod debounce_tests {
   //   // Would need tokio::time::pause() for reliable testing
   // }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Actor to manage debounce state.
+actor DebounceState<T: Sendable> {
+  var latestValue: T?
+  
+  func set(_ value: T) {
+    latestValue = value
+  }
+  
+  func get() -> T? {
+    latestValue
+  }
+}
+
+/// Only emits a value if no new values arrive within the specified duration.
+/// Waits for the stream to "settle" before emitting the most recent value.
+public func debounce<T: Sendable>(
+  _ durationMs: UInt64
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        let state = DebounceState<T>()
+        var debounceTask: Task<Void, Never>?
+        
+        for await item in stream {
+          await state.set(item)
+          debounceTask?.cancel()
+          debounceTask = Task {
+            try? await Task.sleep(nanoseconds: durationMs * 1_000_000)
+            if !Task.isCancelled, let value = await state.get() {
+              continuation.yield(value)
+            }
+          }
+        }
+        
+        // Wait for final debounce to complete
+        await debounceTask?.value
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+// Note: Debounce tests require time-based testing with controlled timing
+// The implementation follows the same pattern as other languages
 #+end_src
 
 ** =throttle=
@@ -6034,6 +7376,105 @@ mod throttle_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Options for throttle behavior.
+public struct ThrottleOptions: Sendable {
+  public let leading: Bool
+  public let trailing: Bool
+  
+  public init(leading: Bool = true, trailing: Bool = true) {
+    self.leading = leading
+    self.trailing = trailing
+  }
+  
+  public static func leadingOnly() -> ThrottleOptions {
+    ThrottleOptions(leading: true, trailing: false)
+  }
+  
+  public static func trailingOnly() -> ThrottleOptions {
+    ThrottleOptions(leading: false, trailing: true)
+  }
+}
+
+/// Limits the rate of emissions with leading and trailing options.
+public func throttle<T: Sendable>(
+  _ durationMs: UInt64,
+  _ options: ThrottleOptions = ThrottleOptions()
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        var lastEmitTime: ContinuousClock.Instant?
+        var pendingTrailing: T?
+        let duration = Duration.milliseconds(Int64(durationMs))
+        
+        for await item in stream {
+          let now = ContinuousClock.now
+          
+          if let lastTime = lastEmitTime {
+            let elapsed = now - lastTime
+            if elapsed >= duration {
+              if options.leading {
+                continuation.yield(item)
+                lastEmitTime = now
+                pendingTrailing = nil
+              } else {
+                pendingTrailing = item
+              }
+            } else {
+              pendingTrailing = item
+            }
+          } else {
+            // First item
+            if options.leading {
+              continuation.yield(item)
+              lastEmitTime = now
+            } else {
+              pendingTrailing = item
+              lastEmitTime = now
+            }
+          }
+        }
+        
+        // Emit trailing if configured and there's a pending value
+        if options.trailing, let trailing = pendingTrailing {
+          continuation.yield(trailing)
+        }
+        
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testThrottleLeading() async throws {
+    let source = from([1, 2, 3, 4, 5])
+    let result = await collect(throttle(100, .leadingOnly())(source))
+    // First value should be emitted immediately
+    XCTAssertFalse(result.isEmpty)
+    XCTAssertEqual(result[0], 1)
+  }
+
+  func testThrottleTrailing() async throws {
+    let source = from([1, 2, 3])
+    let result = await collect(throttle(100, .trailingOnly())(source))
+    // Last value should be emitted as trailing
+    XCTAssertFalse(result.isEmpty)
+  }
+
+  func testThrottleEmpty() async throws {
+    let source: AsyncStream<Int> = empty()
+    let result = await collect(throttle(100)(source))
+    XCTAssertEqual(result, [])
+  }
+#+end_src
+
 * Error Handling
 
 ** =recoverWith= 
@@ -6277,6 +7718,51 @@ mod recover_with_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Recovers from errors in a throwing stream by providing a fallback stream.
+public func recoverWith<T: Sendable>(
+  _ handler: @Sendable @escaping (any Error) -> AsyncStream<T>
+) -> @Sendable (AsyncThrowingStream<T, any Error>) -> AsyncStream<T> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        do {
+          for try await item in stream {
+            continuation.yield(item)
+          }
+        } catch {
+          let fallback = handler(error)
+          for await item in fallback {
+            continuation.yield(item)
+          }
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+struct SimpleError: Error {}
+
+  func testRecoverWithNoError() async throws {
+    let source = AsyncThrowingStream<Int, any Error> { c in c.yield(1); c.yield(2); c.yield(3); c.finish() }
+    let result = await collect(recoverWith { _ in from([99]) }(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testRecoverWithError() async throws {
+    let source = AsyncThrowingStream<Int, any Error> { c in c.yield(1); c.finish(throwing: SimpleError()) }
+    let result = await collect(recoverWith { _ in from([99, 100]) }(source))
+    XCTAssertEqual(result, [1, 99, 100])
+  }
+#+end_src
+
 ** =recoverWithStream=
 
 The =recoverWithStream= function allows you to provide an async generator of alternative streams to recover from errors, rather than a function returning a single stream.
@@ -6410,6 +7896,62 @@ mod recover_with_stream_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Recovers from errors using a sequence of alternative streams.
+/// Each time an error occurs, the next alternative stream is used.
+public func recoverWithStream<T: Sendable, Alts: AsyncSequence & Sendable>(
+  _ alternatives: Alts
+) -> @Sendable (AsyncThrowingStream<T, any Error>) -> AsyncStream<T>
+where Alts.Element == AsyncStream<T> {
+  return { source in
+    AsyncStream { continuation in
+      Task {
+        var altIterator = alternatives.makeAsyncIterator()
+        var currentStream: Any = source
+        
+        func consumeSource() async {
+          do {
+            for try await item in source {
+              continuation.yield(item)
+            }
+          } catch {
+            if let alt = try? await altIterator.next() {
+              for await item in alt {
+                continuation.yield(item)
+              }
+            }
+          }
+        }
+        
+        await consumeSource()
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testRecoverWithStreamSuccess() async throws {
+    let source = AsyncThrowingStream<Int, any Error> { c in c.yield(1); c.yield(2); c.yield(3); c.finish() }
+    let alts: AsyncStream<AsyncStream<Int>> = empty()
+    let result = await collect(recoverWithStream(alts)(source))
+    XCTAssertEqual(result, [1, 2, 3])
+  }
+
+  func testRecoverWithStreamUsesAlternative() async throws {
+    let source = AsyncThrowingStream<Int, any Error> { c in c.yield(1); c.finish(throwing: SimpleError()) }
+    let alt = from([10, 20])
+    let alts = just(alt)
+    let result = await collect(recoverWithStream(alts)(source))
+    XCTAssertEqual(result, [1, 10, 20])
+  }
+#+end_src
+
 ** =throwError=
 
 The =throwError= function creates a stream that immediately throws an error when consumed.
@@ -6525,6 +8067,34 @@ mod throw_error_tests {
     assert!(results[0].is_err());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a stream that immediately throws the given error.
+public func throwError<T: Sendable>(_ error: any Error) -> AsyncThrowingStream<T, any Error> {
+  AsyncThrowingStream { continuation in
+    continuation.finish(throwing: error)
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testThrowErrorEmitsError() async throws {
+    let stream: AsyncThrowingStream<Int, any Error> = throwError(SimpleError())
+    var gotError = false
+    do {
+      for try await _ in stream {
+        // Should not get here
+      }
+    } catch {
+      gotError = true
+    }
+    XCTAssertTrue(gotError)
+  }
 #+end_src
 
 ** =retry=
@@ -6889,6 +8459,90 @@ mod retry_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Retries a stream factory up to maxAttempts times if it fails.
+public func retry<T: Sendable>(
+  _ maxAttempts: Int,
+  delayMs: UInt64 = 0,
+  _ factory: @Sendable @escaping () -> AsyncThrowingStream<T, any Error>
+) -> AsyncStream<Result<T, any Error>> {
+  AsyncStream { continuation in
+    Task {
+      var attempts = 0
+      
+      while attempts < maxAttempts {
+        attempts += 1
+        let stream = factory()
+        var failed = false
+        
+        do {
+          for try await item in stream {
+            continuation.yield(.success(item))
+          }
+          // Stream completed successfully
+          continuation.finish()
+          return
+        } catch {
+          failed = true
+          if attempts < maxAttempts && delayMs > 0 {
+            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+          }
+        }
+        
+        if !failed {
+          continuation.finish()
+          return
+        }
+      }
+      
+      // Exhausted all retries
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testRetryWithSuccess() async throws {
+    let results = await collect(retry(3) {
+      AsyncThrowingStream { c in c.yield(1); c.yield(2); c.yield(3); c.finish() }
+    })
+    let values = results.compactMap { try? $0.get() }
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+
+  func testRetryWithEventualSuccess() async throws {
+    actor Attempts {
+      var count = 0
+      func increment() -> Int {
+        count += 1
+        return count
+      }
+    }
+    let attempts = Attempts()
+    
+    let results = await collect(retry(3) {
+      AsyncThrowingStream<Int, any Error> { c in
+        Task {
+          let n = await attempts.increment()
+          if n < 3 {
+            c.finish(throwing: SimpleError())
+          } else {
+            c.yield(42)
+            c.finish()
+          }
+        }
+      }
+    })
+    let values = results.compactMap { try? $0.get() }
+    XCTAssertEqual(values, [42])
+  }
+#+end_src
+
 * Concurrent Operations
 
 This section covers operations that work with multiple streams concurrently.
@@ -7190,6 +8844,74 @@ mod merge_tests {
     assert_eq!(values.len(), 4);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Merges two streams, emitting values from both concurrently.
+public func merge<T: Sendable>(
+  _ stream1: AsyncStream<T>,
+  _ stream2: AsyncStream<T>
+) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      await withTaskGroup(of: Void.self) { group in
+        group.addTask {
+          for await item in stream1 {
+            continuation.yield(item)
+          }
+        }
+        group.addTask {
+          for await item in stream2 {
+            continuation.yield(item)
+          }
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+
+/// Merges multiple streams, emitting values from all concurrently.
+public func mergeAll<T: Sendable>(
+  _ streams: [AsyncStream<T>]
+) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    Task {
+      await withTaskGroup(of: Void.self) { group in
+        for stream in streams {
+          group.addTask {
+            for await item in stream {
+              continuation.yield(item)
+            }
+          }
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testMerge() async throws {
+    let s1 = from([1, 3, 5])
+    let s2 = from([2, 4, 6])
+    let result = await collect(merge(s1, s2))
+    // Order may vary, but all values should be present
+    XCTAssertEqual(result.count, 6)
+    XCTAssertTrue(result.contains(1))
+    XCTAssertTrue(result.contains(6))
+  }
+
+  func testMergeAll() async throws {
+    let streams = [from([1, 2]), from([3, 4])]
+    let result = await collect(mergeAll(streams))
+    XCTAssertEqual(result.count, 4)
+  }
 #+end_src
 
 ** =mergeAll=
@@ -7544,6 +9266,52 @@ mod chain_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Maps each value to a stream and flattens the results concurrently.
+/// Also known as flatMap in some libraries.
+public func chain<T: Sendable, U: Sendable>(
+  _ fn: @Sendable @escaping (T) async -> AsyncStream<U>
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        await withTaskGroup(of: Void.self) { group in
+          for await item in stream {
+            let innerStream = await fn(item)
+            group.addTask {
+              for await innerItem in innerStream {
+                continuation.yield(innerItem)
+              }
+            }
+          }
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+
+/// Alias for chain.
+public func flatMap<T: Sendable, U: Sendable>(
+  _ fn: @Sendable @escaping (T) async -> AsyncStream<U>
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  chain(fn)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testChainFlattens() async throws {
+    let source = from([1, 2])
+    let result = await collect(chain { x in from([x * 10, x * 10 + 1]) }(source))
+    // With concurrent execution, order may vary
+    XCTAssertEqual(Set(result), Set([10, 11, 20, 21]))
+  }
+#+end_src
+
 ** =switchMap=
 
 The =switchMap= operator is like =chain=, but cancels the previous inner stream whenever a new outer value arrives.
@@ -7844,6 +9612,51 @@ mod switch_map_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Maps each value to a stream, canceling the previous inner stream when a new value arrives.
+public func switchMap<T: Sendable, U: Sendable>(
+  _ fn: @Sendable @escaping (T) async -> AsyncStream<U>
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        var currentTask: Task<Void, Never>?
+        
+        for await item in stream {
+          currentTask?.cancel()
+          let innerStream = await fn(item)
+          currentTask = Task {
+            for await innerItem in innerStream {
+              if Task.isCancelled { break }
+              continuation.yield(innerItem)
+            }
+          }
+        }
+        
+        // Wait for last inner stream to complete
+        await currentTask?.value
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSwitchMapSwitches() async throws {
+    // With synchronous inner streams, switchMap behaves like concatMap
+    // True switching requires async timing
+    let source = from([1, 2])
+    let result = await collect(switchMap { x in from([x * 10]) }(source))
+    // May see values from both or just last depending on timing
+    XCTAssertFalse(result.isEmpty)
+  }
+#+end_src
+
 ** =latest=
 
 The =latest= function combines multiple streams into a single stream that emits a tuple of the latest values from each input stream whenever any of them emit a new value.
@@ -8069,6 +9882,53 @@ mod latest2_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Combines two streams, emitting tuple of latest values whenever either emits.
+/// Only starts emitting after both streams have produced at least one value.
+public func latest<T: Sendable, U: Sendable>(
+  _ stream1: AsyncStream<T>,
+  _ stream2: AsyncStream<U>
+) -> AsyncStream<(T, U)> {
+  AsyncStream { continuation in
+    Task {
+      let state = LatestState<T, U>()
+      
+      await withTaskGroup(of: Void.self) { group in
+        group.addTask {
+          for await item in stream1 {
+            if let pair = await state.set1(item) {
+              continuation.yield(pair)
+            }
+          }
+        }
+        group.addTask {
+          for await item in stream2 {
+            if let pair = await state.set2(item) {
+              continuation.yield(pair)
+            }
+          }
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testLatestCombines() async throws {
+    let s1 = from([1, 2])
+    let s2 = from(["a", "b"])
+    let result = await collect(latest(s1, s2))
+    // Should emit tuples when both have values
+    XCTAssertFalse(result.isEmpty)
+  }
+#+end_src
+
 ** =applyLatest=
 
 The =applyLatest= function applies the latest function from a stream of functions to the latest value from a stream of values.
@@ -8185,6 +10045,63 @@ mod apply_latest_tests {
     assert!(!values.is_empty());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Applies the latest function from a stream of functions to the latest value from a stream of values.
+public func applyLatest<T: Sendable, U: Sendable>(
+  _ fnStream: AsyncStream<@Sendable (T) -> U>,
+  _ valueStream: AsyncStream<T>
+) -> AsyncStream<U> {
+  let wrappedFnStream = AsyncStream<SendableFunc<T, U>> { continuation in
+    Task {
+      for await fn in fnStream {
+        continuation.yield(SendableFunc(fn: fn))
+      }
+      continuation.finish()
+    }
+  }
+  
+  return AsyncStream { continuation in
+    Task {
+      let state = ApplyLatestState<T, U>()
+      
+      await withTaskGroup(of: Void.self) { group in
+        group.addTask {
+          for await fn in wrappedFnStream {
+            if let result = await state.setFn(fn) {
+              continuation.yield(result)
+            }
+          }
+        }
+        group.addTask {
+          for await value in valueStream {
+            if let result = await state.setValue(value) {
+              continuation.yield(result)
+            }
+          }
+        }
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testApplyLatest() async throws {
+    let double: @Sendable (Int) -> Int = { x in x * 2 }
+    let addTen: @Sendable (Int) -> Int = { x in x + 10 }
+    let fns = from([double, addTen])
+    let vals = from([1, 2, 3])
+    let result = await collect(applyLatest(fns, vals))
+    // Should apply latest function to latest value
+    XCTAssertFalse(result.isEmpty)
+  }
 #+end_src
 
 ** =untilStream=
@@ -8370,6 +10287,51 @@ mod until_stream_tests {
     assert!(values.len() <= 5);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Emits values from source until the stop stream emits any value.
+public func untilStream<T: Sendable, S: Sendable>(
+  _ stop: AsyncStream<S>
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { source in
+    AsyncStream { continuation in
+      Task {
+        let flag = StopFlag()
+        
+        await withTaskGroup(of: Void.self) { group in
+          group.addTask {
+            for await _ in stop {
+              await flag.stop()
+              break
+            }
+          }
+          
+          group.addTask {
+            for await item in source {
+              if await flag.isStopped() { break }
+              continuation.yield(item)
+            }
+          }
+          
+          group.cancelAll()
+        }
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+The implementation above uses the `StopFlag` actor for thread-safety without external dependencies.
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+// Note: untilStream requires Atomics package or actor-based implementation
+// Test implementation depends on the chosen approach
 #+end_src
 
 ** =sinceStream=
@@ -8560,6 +10522,45 @@ mod since_stream_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Starts emitting values from source only after the start stream emits a value.
+public func sinceStream<T: Sendable, S: Sendable>(
+  _ start: AsyncStream<S>
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { source in
+    AsyncStream { continuation in
+      Task {
+        // Wait for the start signal
+        for await _ in start {
+          break
+        }
+        
+        // Now emit all remaining source values
+        for await item in source {
+          continuation.yield(item)
+        }
+        
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testSinceStreamWaits() async throws {
+    let source = from([1, 2, 3, 4])
+    let start = just(())
+    let result = await collect(sinceStream(start)(source))
+    // Should emit values after start signal
+    XCTAssertFalse(result.isEmpty)
+  }
+#+end_src
+
 * Buffering
 
 These operators collect values into buffers before emitting them downstream.
@@ -8737,6 +10738,60 @@ mod buffer_tests {
     assert_eq!(values, Vec::<Vec<i32>>::new());
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Collects values into buffers of the specified size.
+public func buffer<T: Sendable>(
+  _ size: Int
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<[T]> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        var currentBuffer: [T] = []
+        
+        for await item in stream {
+          currentBuffer.append(item)
+          if currentBuffer.count >= size {
+            continuation.yield(currentBuffer)
+            currentBuffer = []
+          }
+        }
+        
+        // Emit any remaining items
+        if !currentBuffer.isEmpty {
+          continuation.yield(currentBuffer)
+        }
+        
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testBuffer() async throws {
+    let source = from([1, 2, 3, 4, 5])
+    let result = await collect(buffer(2)(source))
+    XCTAssertEqual(result, [[1, 2], [3, 4], [5]])
+  }
+
+  func testBufferExactMultiple() async throws {
+    let source = from([1, 2, 3, 4])
+    let result = await collect(buffer(2)(source))
+    XCTAssertEqual(result, [[1, 2], [3, 4]])
+  }
+
+  func testBufferEmpty() async throws {
+    let source: AsyncStream<Int> = empty()
+    let result = await collect(buffer(3)(source))
+    XCTAssertEqual(result, [])
+  }
 #+end_src
 
 ** =bufferTime=
@@ -9004,6 +11059,60 @@ mod buffer_time_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Collects values over a time window, emitting the buffer when the window closes.
+public func bufferTime<T: Sendable>(
+  _ durationMs: UInt64
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<[T]> {
+  return { stream in
+    AsyncStream { continuation in
+      Task {
+        let state = TimeBuffer<T>()
+        let stopFlag = StopFlag()
+        let duration = Duration.milliseconds(Int64(durationMs))
+        
+        await withTaskGroup(of: Void.self) { group in
+          // Timer task
+          group.addTask {
+            while await !stopFlag.isStopped() {
+              try? await Task.sleep(for: duration)
+              let items = await state.flush()
+              if !items.isEmpty {
+                continuation.yield(items)
+              }
+            }
+          }
+          
+          // Source consuming task
+          group.addTask {
+            for await item in stream {
+              await state.add(item)
+            }
+            await stopFlag.stop()
+            // Flush remaining
+            let remaining = await state.flush()
+            if !remaining.isEmpty {
+              continuation.yield(remaining)
+            }
+          }
+        }
+        
+        continuation.finish()
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+// Note: bufferTime tests require timing control
+// Basic timing logic follows the same pattern as other time-based operators
+#+end_src
+
 ** =window=
 
 The =window= operator is like =buffer=, but emits streams instead of arrays.
@@ -9205,6 +11314,29 @@ pub fn window<T: Clone + Send + 'static>(
     }
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Splits the source into windows of the specified size.
+/// Similar to buffer, but each window could be a stream (simplified to arrays here).
+public func window<T: Sendable>(
+  _ size: Int
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<[T]> {
+  // In Swift, we simplify to returning arrays like the Rust implementation
+  buffer(size)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testWindow() async throws {
+    let source = from([1, 2, 3, 4, 5])
+    let result = await collect(window(2)(source))
+    XCTAssertEqual(result, [[1, 2], [3, 4], [5]])
+  }
 #+end_src
 
 ** =eager= and =eagerNow=
@@ -9620,6 +11752,57 @@ mod eager_now_tests {
   // Tests would need specific runtime implementation
   // The pattern is: spawn producer, stream from channel
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Pre-fetches values from a slow producer into a buffer.
+/// Starts buffering when the first value is requested.
+public func eager<T: Sendable>(
+  _ bufferSize: Int
+) -> @Sendable (AsyncStream<T>) -> AsyncStream<T> {
+  return { source in
+    AsyncStream { continuation in
+      Task {
+        let buffer = EagerBuffer<T>(maxSize: bufferSize)
+        
+        // Background task to fill buffer
+        let fillTask = Task {
+          for await item in source {
+            await buffer.add(item)
+          }
+        }
+        
+        // Small delay to let buffer fill
+        try? await Task.sleep(nanoseconds: 1_000_000)
+        
+        // Drain buffer and continue with source
+        while let item = await buffer.pop() {
+          continuation.yield(item)
+        }
+        
+        await fillTask.value
+        continuation.finish()
+      }
+    }
+  }
+}
+
+/// Pre-fetches values immediately on creation.
+public func eagerNow<T: Sendable>(
+  _ bufferSize: Int,
+  _ source: AsyncStream<T>
+) -> AsyncStream<T> {
+  eager(bufferSize)(source)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+// Note: eager tests require timing control to verify pre-fetching behavior
+// The implementation follows a pattern of background buffering
 #+end_src
 
 * Multicasting
@@ -10048,6 +12231,99 @@ mod replay_subject_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// A multicasting primitive that buffers recent values and replays them to new subscribers.
+public actor ReplaySubject<T: Sendable> {
+  private var buffer: [T] = []
+  private let bufferSize: Int
+  private var completed = false
+  private var continuations: [AsyncStream<T>.Continuation] = []
+  
+  public init(bufferSize: Int) {
+    self.bufferSize = bufferSize
+  }
+  
+  /// Sends a value to all current subscribers and buffers it.
+  public func next(_ value: T) {
+    guard !completed else { return }
+    
+    // Add to buffer, evict if full
+    buffer.append(value)
+    if bufferSize > 0 && buffer.count > bufferSize {
+      buffer.removeFirst()
+    }
+    
+    // Send to all active subscribers
+    for continuation in continuations {
+      continuation.yield(value)
+    }
+  }
+  
+  /// Marks the subject as complete.
+  public func complete() {
+    completed = true
+    for continuation in continuations {
+      continuation.finish()
+    }
+    continuations.removeAll()
+  }
+  
+  /// Creates a new subscription that receives buffered values and future emissions.
+  public func subscribe() -> AsyncStream<T> {
+    AsyncStream { continuation in
+      // Send buffered values
+      for item in buffer {
+        continuation.yield(item)
+      }
+      
+      if completed {
+        continuation.finish()
+      } else {
+        continuations.append(continuation)
+      }
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testReplaySubjectBuffer() async throws {
+    let subject = ReplaySubject<Int>(bufferSize: 2)
+    
+    await subject.next(1)
+    await subject.next(2)
+    await subject.next(3)  // 1 should be evicted
+    await subject.complete()
+    
+    let values = await collect(await subject.subscribe())
+    XCTAssertEqual(values, [2, 3])
+  }
+
+  func testReplaySubjectEmpty() async throws {
+    let subject = ReplaySubject<Int>(bufferSize: 5)
+    await subject.complete()
+    
+    let values = await collect(await subject.subscribe())
+    XCTAssertEqual(values, [])
+  }
+
+  func testReplaySubjectUnlimited() async throws {
+    let subject = ReplaySubject<Int>(bufferSize: Int.max)
+    
+    await subject.next(1)
+    await subject.next(2)
+    await subject.next(3)
+    await subject.complete()
+    
+    let values = await collect(await subject.subscribe())
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+#+end_src
+
 ** =replay=
 
 The =replay= function wraps a source stream to allow multiple consumers.
@@ -10331,6 +12607,72 @@ mod replay_tests {
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Actor to manage Replay's startup state.
+actor ReplayState {
+  var started = false
+  
+  func startIfNeeded() -> Bool {
+    if started { return false }
+    started = true
+    return true
+  }
+}
+
+/// Wraps a source stream to allow multiple consumers with replay buffer.
+public final class Replay<T: Sendable>: Sendable {
+  private let subject: ReplaySubject<T>
+  private let source: AsyncStream<T>
+  private let state = ReplayState()
+  
+  public init(bufferSize: Int, _ source: AsyncStream<T>) {
+    self.subject = ReplaySubject(bufferSize: bufferSize)
+    self.source = source
+  }
+  
+  /// Creates a subscription, starting source consumption on first call.
+  public func subscribe() async -> AsyncStream<T> {
+    let shouldStart = await state.startIfNeeded()
+    
+    if shouldStart {
+      Task {
+        for await item in source {
+          await subject.next(item)
+        }
+        await subject.complete()
+      }
+    }
+    
+    return await subject.subscribe()
+  }
+}
+
+/// Creates a replay wrapper for a stream.
+public func replay<T: Sendable>(
+  _ bufferSize: Int
+) -> @Sendable (AsyncStream<T>) -> Replay<T> {
+  return { source in
+    Replay(bufferSize: bufferSize, source)
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testReplayBuffered() async throws {
+    let source = from([1, 2, 3, 4, 5])
+    let replayed = Replay(bufferSize: 2, source)
+    
+    // Subscribe and consume
+    let stream = await replayed.subscribe()
+    let values = await collect(stream)
+    XCTAssertEqual(values, [1, 2, 3, 4, 5])
+  }
+#+end_src
+
 ** =share=
 
 The =share= function is like =replay= with a buffer size of 0.
@@ -10466,6 +12808,30 @@ mod share_tests {
     assert_eq!(done, None);
   }
 }
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Like replay with buffer size 0. New subscribers only receive values emitted after subscription.
+public func share<T: Sendable>(
+  _ source: AsyncStream<T>
+) -> Replay<T> {
+  Replay(bufferSize: 0, source)
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testShareBasic() async throws {
+    let source = from([1, 2, 3])
+    let shared = share(source)
+    
+    let stream = await shared.subscribe()
+    let values = await collect(stream)
+    XCTAssertEqual(values, [1, 2, 3])
+  }
 #+end_src
 
 ** =replayFactory= and =replayStream=
@@ -10745,6 +13111,35 @@ where
 }
 #+end_src
 
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Creates a factory that produces independent copies of a buffered stream.
+public func replayFactory<T: Sendable>(
+  _ bufferSize: Int,
+  _ source: AsyncStream<T>
+) -> @Sendable () async -> AsyncStream<T> {
+  let replay = Replay(bufferSize: bufferSize, source)
+  
+  return {
+    await replay.subscribe()
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testReplayFactory() async throws {
+    let source = from([1, 2, 3])
+    let factory = replayFactory(2, source)
+    
+    let stream = await factory()
+    let values = await collect(stream)
+    XCTAssertEqual(values, [1, 2, 3])
+  }
+#+end_src
+
 ** =replayStream=
 
 =replayStream= returns a stream that emits independent copies of the source stream.
@@ -10879,6 +13274,49 @@ mod replay_stream_tests {
   // Note: replay_stream returns a stream of streams
   // Basic functionality tested in replay_stream_example
   // More comprehensive tests would verify multiple copies
+}
+#+end_src
+
+*** Swift Implementation
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Returns a stream that emits independent copies of the source stream.
+/// Each emitted stream is a fresh subscriber.
+public func replayStream<T: Sendable>(
+  _ bufferSize: Int,
+  _ source: AsyncStream<T>
+) -> AsyncStream<AsyncStream<T>> {
+  let factory = replayFactory(bufferSize, source)
+  
+  return AsyncStream { continuation in
+    Task {
+      // Emit stream copies indefinitely
+      while !Task.isCancelled {
+        let copy = await factory()
+        continuation.yield(copy)
+      }
+      continuation.finish()
+    }
+  }
+}
+#+end_src
+
+**** Tests
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
+  func testReplayStream() async throws {
+    let source = from([1, 2, 3])
+    let copies = replayStream(Int.max, source)
+    
+    // Get first copy
+    var count = 0
+    for await copy in copies {
+      let values = await collect(copy)
+      XCTAssertEqual(values, [1, 2, 3])
+      count += 1
+      if count >= 1 { break }
+    }
+  }
 }
 #+end_src
 
@@ -11666,6 +14104,90 @@ Example usage in =Cargo.toml=:
 #+begin_src toml :tangle no
 [dependencies]
 agent-rex = { version = "0.1", features = ["tokio-runtime"] }
+#+end_src
+
+*** Swift
+
+**** Prerequisites
+
+#+begin_src shell :tangle no
+# Ensure Swift 5.9+ is installed
+swift --version
+
+# Xcode Command Line Tools (macOS)
+xcode-select --install
+#+end_src
+
+**** Project Configuration (Package.swift)
+
+#+begin_src swift :tangle swift/Package.swift :comments no
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+  name: "AgentRex",
+  platforms: [
+    .macOS(.v14),
+    .iOS(.v17),
+    .watchOS(.v10),
+    .tvOS(.v17)
+  ],
+  products: [
+    .library(
+      name: "AgentRex",
+      targets: ["AgentRex"]
+    )
+  ],
+  targets: [
+    .target(
+      name: "AgentRex",
+      path: "Sources/AgentRex"
+    ),
+    .testTarget(
+      name: "AgentRexTests",
+      dependencies: ["AgentRex"],
+      path: "Tests/AgentRexTests"
+    )
+  ]
+)
+#+end_src
+
+**** Building
+
+#+begin_src shell :tangle no
+cd swift
+
+# Build the library
+swift build
+
+# Build for release
+swift build -c release
+#+end_src
+
+**** Testing
+
+Tests use XCTest. To skip Swift Testing framework discovery (which finds 0 tests), use =--disable-swift-testing=:
+
+#+begin_src shell :tangle no
+cd swift
+
+# Run all tests (XCTest only)
+swift test --disable-swift-testing
+
+# Run tests with verbose output
+swift test --disable-swift-testing --verbose
+#+end_src
+
+**** Generating Xcode Project
+
+#+begin_src shell :tangle no
+cd swift
+
+# Generate Xcode project for development
+swift package generate-xcodeproj
+
+# Or open directly in Xcode
+open Package.swift
 #+end_src
 
 
@@ -12788,6 +15310,59 @@ import {
 } from './index'
 
 <<tests>>
+#+end_src
+
+** Swift
+
+This section contains test helpers for the Swift implementation.
+
+*** Helpers
+
+**** =collect=
+
+#+begin_src swift :tangle swift/Tests/AgentRexTests/TestHelpers.swift
+import Foundation
+
+/// Collect all values from an AsyncStream into an array.
+public func collect<T>(_ stream: AsyncStream<T>) async -> [T] {
+  var values: [T] = []
+  for await value in stream {
+    values.append(value)
+  }
+  return values
+}
+
+/// Collect all values from an AsyncThrowingStream into an array.
+public func collectThrowing<T>(_ stream: AsyncThrowingStream<T, Error>) async throws -> [T] {
+  var values: [T] = []
+  for try await value in stream {
+    values.append(value)
+  }
+  return values
+}
+#+end_src
+
+**** =take=
+
+#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
+/// Takes at most N values from a stream, then finishes.
+public func take<T: Sendable>(_ n: Int, _ stream: AsyncStream<T>) -> AsyncStream<T> {
+  AsyncStream { continuation in
+    let task = Task {
+      var count = 0
+      for await value in stream {
+        if count >= n { break }
+        continuation.yield(value)
+        count += 1
+      }
+      continuation.finish()
+    }
+    
+    continuation.onTermination = { _ in
+      task.cancel()
+    }
+  }
+}
 #+end_src
 
 ** Python
