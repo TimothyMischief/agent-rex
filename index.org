@@ -182,6 +182,89 @@ The =value= property of this object contains the yielded value from the generato
 This mechanism allows async generators to produce values asynchronously, making them well-suited for representing streams of data that may arrive over time.
 They are also lazy, meaning that values are only produced when requested, which can help with performance and resource management.
 
+** Python: Async Generators and Async Iterators
+
+Python's async generators and async iterators are conceptually similar to JavaScript's, but with some differences in syntax and behavior.
+In Python, you define an async generator using the =async def= syntax and use =yield= to produce values:
+
+*** Setup
+
+We need to import necessary types and define some basic utilities for our Python implementation of Agent-Rex.
+Python Generics need to be created with TypeVar, and we will use AsyncIterator and AsyncIterable for our stream types.
+
+#+begin_src python :tangle python/agent_rex.py
+"""
+Agent-Rex: An Async Generator/Iterator Based FRP-Like Library for Python
+
+This library provides composable async stream operators similar to RxJS/Most.js,
+built on Python's native async generators.
+
+Example:
+  from agent_rex import just, map, filter, pipe, collect
+
+  async def main():
+    result = await collect(pipe(
+      just(42),
+      map(lambda x: x * 2),
+    ))
+    print(result) # [84]
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import (
+  TypeVar, AsyncIterator, AsyncIterable, Callable, Awaitable,
+  Optional, Union, List, Tuple, Any, Generic, overload
+)
+from dataclasses import dataclass
+from collections import deque
+
+T = TypeVar('T')
+U = TypeVar('U')
+S = TypeVar('S')
+E = TypeVar('E')
+#+end_src
+
+*** Test Setup
+
+#+begin_src python :tangle python/test_agent_rex.py
+"""Tests for the agent_rex library."""
+
+import asyncio
+from typing import TypeVar, AsyncIterable, List
+import pytest
+
+T = TypeVar('T')
+
+from agent_rex import (
+  # Creation
+  just, of, from_promise, from_iter, periodic, empty, never,
+  iterate, unfold, start_with, concat,
+  # Composition
+  pipe,
+  # Transformation
+  map, constant, scan, tap, await_tap, continue_with,
+  concat_all, concat_map,
+  # Filtering
+  filter, skip_repeats, skip_repeats_with,
+  # Slicing
+  take, skip, slice, take_while, skip_while, take_until,
+  # Time
+  delay,
+  # Error handling
+  recover_with, throw_error, retry, RetryOptions,
+  # Concurrent
+  merge, merge_all, chain, flat_map, switch_map, latest,
+  # Buffering
+  buffer, eager,
+  # Multicasting
+  ReplaySubject, replay, share,
+  # Types
+  UnfoldResult
+)
+#+end_src
+
 ** Rust: Async Streams and Runtime Independence
 
 Rust takes a different approach to async than JavaScript. In JavaScript, the runtime (the browser or Node.js) provides async facilities like timers and I/O automatically. In Rust, async is *runtime-agnostic* — the language provides the primitives (=Future=, =async/await=), but you choose the executor that runs your async code.
@@ -464,15 +547,34 @@ describe('just', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def just(value: T) -> AsyncIterator[T]:
+  """Creates a stream that emits a single value and then completes."""
+  yield value
+
+# Alias for just
+of = just
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestJust:
+  async def test_emits_single_value(self):
+    result = await collect(just(42))
+    assert result == [42]
+  async def test_of_is_alias(self):
+    result = await collect(of("hello"))
+    assert result == ["hello"]
+#+end_src
+
 *** Rust Implementation
 
 In Rust, we use =async_stream= for ergonomic async generators with tokio:
 
 #+begin_src rust :tangle rust/src/lib.rs
-// ============================================================================
-// Creation Operators
-// ============================================================================
-
 /// Create a stream that emits a single value.
 pub fn just<T>(value: T) -> impl Stream<Item = T> {
   stream! { yield value; }
@@ -574,6 +676,33 @@ describe('fromPromise', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def from_future(awaitable: Awaitable[T]) -> AsyncIterator[T]:
+  """Creates a stream from an awaitable (coroutine/Future).
+
+  When the awaitable resolves, the stream emits the resolved value and completes.
+  """
+  value = await awaitable
+  yield value
+
+# Alias for API consistency with JavaScript
+from_promise = from_future
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestFromPromise:
+  async def test_emits_awaitable_result(self):
+    async def get_value():
+      return 99
+    
+    result = await collect(from_promise(get_value()))
+    assert result == [99]
+#+end_src
+
 *** Rust Implementation
 
 In Rust, futures are the equivalent of Promises:
@@ -670,11 +799,42 @@ describe('from', () => {
     const values = await collect(from([1, 2, 3]))
     expect(values).toEqual([1, 2, 3])
   })
-
   it('handles empty arrays', async () => {
     await expectStream(from([])).toBeEmpty()
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def from_iter(iterable: Union[AsyncIterable[T], list[T], tuple]) -> AsyncIterator[T]:
+  """Creates a stream from an iterable or async iterable.
+
+  Emits each value from the iterable in sequence.
+  """
+  if hasattr(iterable, '__aiter__'):
+    async for item in iterable: yield item
+  else:
+    for item in iterable: yield item
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestFromIter:
+  async def test_from_list(self):
+    result = await collect(from_iter([1, 2, 3]))
+    assert result == [1, 2, 3]
+  async def test_from_tuple(self):
+    result = await collect(from_iter((4, 5, 6)))
+    assert result == [4, 5, 6]
+  async def test_from_async_iterable(self):
+    async def gen():
+      for i in [7, 8, 9]:
+        yield i
+    result = await collect(from_iter(gen()))
+    assert result == [7, 8, 9]
 #+end_src
 
 *** Rust Implementation
@@ -771,7 +931,6 @@ export async function* periodic(intervalMs: number): AsyncGenerator<void, void, 
 }
 #+end_src
 
-
 **** Tests
 
 #+begin_src typescript :noweb-ref tests
@@ -781,6 +940,28 @@ describe('periodic', () => {
     expect(values).toEqual([undefined, undefined, undefined])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def periodic(interval_seconds: float) -> AsyncIterator[None]:
+  """Creates a stream that emits at regular intervals. To give it a value, combine it with `constant`."""
+  while True:
+    yield None
+    await asyncio.sleep(interval_seconds)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestPeriodic:
+  async def test_emits_none_periodically(self):
+    result = await collect(pipe(
+      periodic(0.01),
+      take(3)
+    ))
+    assert result == [None, None, None]
 #+end_src
 
 *** Rust Implementation
@@ -895,6 +1076,24 @@ describe('empty', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def empty() -> AsyncIterator[Any]:
+  """Creates a stream that immediately completes without emitting any values."""
+  return
+  yield # Makes this a generator
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestEmpty:
+  async def test_completes_immediately(self):
+    result = await collect(empty())
+    assert result == []
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -986,6 +1185,21 @@ describe('never', () => {
     expect(result).toBe('timeout')
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def never() -> AsyncIterator[Any]:
+  """Creates a stream that never emits any values and never completes."""
+  await asyncio.Event().wait() # Wait forever
+  yield # Unreachable, but makes this a generator
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -1100,6 +1314,34 @@ describe('iterate', () => {
     expect(values).toEqual([10, 11, 12])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def iterate(seed: T, fn: Callable[[T], T]) -> AsyncIterator[T]:
+  """Creates a stream that emits an infinite sequence by repeatedly applying a function.
+
+  Args:
+    seed: Initial value to emit and feed into fn
+    fn: Function applied to each value to produce the next
+  """
+  current = seed
+  while True:
+    yield current
+    current = fn(current)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestIterate:
+  async def test_generates_sequence(self):
+    result = await collect(pipe(
+      iterate(1, lambda x: x * 2),
+      take(5)
+    ))
+    assert result == [1, 2, 4, 8, 16]
 #+end_src
 
 *** Rust Implementation
@@ -1238,6 +1480,47 @@ describe('unfold', () => {
     expect(values).toEqual([])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@dataclass
+class UnfoldResult(Generic[T, S]):
+  """Result of an unfold step."""
+  value: T
+  next_seed: S
+  done: bool
+
+
+async def unfold(
+  seed: S,
+  fn: Callable[[S], UnfoldResult[T, S]]
+) -> AsyncIterator[T]:
+  """Creates a stream by unfolding a seed value. The function returns an object containing the next value, next seed, and done flag."""
+  current_seed = seed
+  while True:
+    result = fn(current_seed)
+    if result.done:
+      return
+    yield result.value
+    current_seed = result.next_seed
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestUnfold:
+  async def test_unfolds_until_done(self):
+    result = await collect(unfold(
+      1,
+      lambda x: UnfoldResult(
+        value=x,
+        next_seed=x + 1,
+        done=x > 3
+      )
+    ))
+    assert result == [1, 2, 3]
 #+end_src
 
 *** Rust Implementation
@@ -1389,6 +1672,25 @@ describe('startWith', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def start_with(value: T, stream: AsyncIterable[T]) -> AsyncIterator[T]:
+  """Prepends a value to the beginning of a stream."""
+  yield value
+  async for item in stream:
+    yield item
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestStartWith:
+  async def test_prepends_value(self):
+    result = await collect(start_with(0, from_iter([1, 2, 3])))
+    assert result == [0, 1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -1485,6 +1787,29 @@ describe('concat', () => {
     expect(result).toEqual([1, 2, 3, 4])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def concat(*streams: AsyncIterable[T]) -> AsyncIterator[T]:
+  """Concatenates multiple streams into a single stream."""
+  for stream in streams:
+    async for item in stream:
+      yield item
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestConcat:
+  async def test_concatenates_streams(self):
+    result = await collect(concat(
+      from_iter([1, 2]),
+      from_iter([3, 4]),
+      from_iter([5])
+    ))
+    assert result == [1, 2, 3, 4, 5]
 #+end_src
 
 *** Rust Implementation
@@ -1700,6 +2025,18 @@ describe('fromEvent', () => {
 })
 #+end_src
 
+*** TODO Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
+#+end_src
+
 *** Rust Implementation
 
 In Rust, event-driven patterns use channels. We use =futures::channel= for runtime independence:
@@ -1829,6 +2166,49 @@ export function pipe<A, Fns extends Fn[]>(initial: A, ...fns: Fns & ValidatePipe
 export function pipe(initial: unknown, ...fns: Fn[]): unknown {
   return fns.reduce((acc, fn) => fn(acc), initial)
 }
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+def pipe(initial: T, *fns: Callable) -> Any:
+  """Composes functions left-to-right, passing the result of each to the next.
+
+  The first argument is the initial value; subsequent arguments are unary functions.
+
+  Example:
+    result = pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      filter(lambda x: x % 2 == 0),
+      map(lambda x: x * 10),
+      take(2),
+    )
+  """
+  from functools import reduce
+  return reduce(lambda acc, fn: fn(acc), fns, initial)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestPipe:
+  async def test_composes_operators(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+      filter(lambda x: x % 2 == 0),
+      map(lambda x: x * 10),
+      take(3),
+    ))
+    assert result == [20, 40, 60]
+
+  async def test_complex_pipeline(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      concat_map(lambda x: from_iter([x, -x])),
+      filter(lambda x: x > 0),
+      scan(lambda acc, x: acc + x, 0),
+    ))
+    assert result == [0, 1, 3, 6]
 #+end_src
 
 *** Rust Implementation
@@ -1970,6 +2350,52 @@ describe('map', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def map(fn: Callable[[T], Union[U, Awaitable[U]]]) -> Callable[[AsyncIterable[T]], AsyncIterator[U]]: ...
+@overload
+def map(fn: Callable[[T], Union[U, Awaitable[U]]], stream: AsyncIterable[T]) -> AsyncIterator[U]: ...
+
+def map(fn: Callable[[T], Union[U, Awaitable[U]]], stream: Optional[AsyncIterable[T]] = None):
+  """Transforms each value emitted by a stream using a provided function."""
+  async def _map(s: AsyncIterable[T]) -> AsyncIterator[U]:
+    async for item in s:
+      result = fn(item)
+      if asyncio.iscoroutine(result):
+        yield await result
+      else:
+        yield result # type: ignore
+
+  if stream is None:
+    return _map
+  return _map(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestMap:
+  async def test_transforms_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      map(lambda x: x * 10)
+    ))
+    assert result == [10, 20, 30]
+
+  async def test_async_transform(self):
+    async def async_transform(x):
+      await asyncio.sleep(0)
+      return x * 2
+    
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      map(async_transform)
+    ))
+    assert result == [2, 4, 6]
+#+end_src
+
 *** Rust Implementation
 
 =StreamExt::map= is built-in. This standalone function is provided for pipe-style composition:
@@ -2106,6 +2532,37 @@ describe('constant', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def constant(value: U) -> Callable[[AsyncIterable[Any]], AsyncIterator[U]]: ...
+@overload
+def constant(value: U, stream: AsyncIterable[Any]) -> AsyncIterator[U]: ...
+
+def constant(value: U, stream: Optional[AsyncIterable[Any]] = None):
+  """Creates a stream that emits a constant value for each item in the source stream."""
+  async def _constant(s: AsyncIterable[Any]) -> AsyncIterator[U]:
+    async for _ in s:
+      yield value
+
+  if stream is None:
+    return _constant
+  return _constant(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestConstant:
+  async def test_replaces_with_constant(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      constant("x")
+    ))
+    assert result == ["x", "x", "x"]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -2233,6 +2690,55 @@ describe('scan', () => {
     expect(result).toEqual([0, 1, 3, 6])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def scan(
+  accumulator: Callable[[U, T], Union[U, Awaitable[U]]],
+  seed: U
+) -> Callable[[AsyncIterable[T]], AsyncIterator[U]]: ...
+@overload
+def scan(
+  accumulator: Callable[[U, T], Union[U, Awaitable[U]]],
+  seed: U,
+  stream: AsyncIterable[T]
+) -> AsyncIterator[U]: ...
+
+def scan(
+  accumulator: Callable[[U, T], Union[U, Awaitable[U]]],
+  seed: U,
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Accumulates values using an accumulator function, emitting each intermediate result. Yields the seed first, then each accumulated value."""
+  async def _scan(s: AsyncIterable[T]) -> AsyncIterator[U]:
+    acc = seed
+    yield acc
+    async for item in s:
+      result = accumulator(acc, item)
+      if asyncio.iscoroutine(result):
+        acc = await result
+      else:
+        acc = result # type: ignore
+      yield acc
+
+  if stream is None:
+    return _scan
+  return _scan(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestScan:
+  async def test_accumulates_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      scan(lambda acc, x: acc + x, 0)
+    ))
+    assert result == [0, 1, 3, 6]
 #+end_src
 
 *** Rust Implementation
@@ -2382,6 +2888,45 @@ describe('tap', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def tap(fn: Callable[[T], Any]) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def tap(fn: Callable[[T], Any], stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def tap(fn: Callable[[T], Any], stream: Optional[AsyncIterable[T]] = None):
+  """Performs side effects for each value without modifying them.
+
+  The side effect is fired without awaiting.
+  """
+  async def _tap(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      fn(item) # Fire and forget
+      yield item
+
+  if stream is None:
+    return _tap
+  return _tap(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestTap:
+  async def test_performs_side_effect(self):
+    side_effects = []
+    
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      tap(lambda x: side_effects.append(x))
+    ))
+    
+    assert result == [1, 2, 3]
+    assert side_effects == [1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -2518,6 +3063,32 @@ describe('awaitTap', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def await_tap(fn: Callable[[T], Awaitable[Any]]) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def await_tap(fn: Callable[[T], Awaitable[Any]], stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def await_tap(fn: Callable[[T], Awaitable[Any]], stream: Optional[AsyncIterable[T]] = None):
+  """Performs side effects for each value, awaiting completion before yielding."""
+  async def _await_tap(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      await fn(item)
+      yield item
+
+  if stream is None:
+    return _await_tap
+  return _await_tap(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -2652,6 +3223,47 @@ describe('continueWith', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def continue_with(
+  f: Callable[[], AsyncIterable[T]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def continue_with(
+  f: Callable[[], AsyncIterable[T]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def continue_with(
+  f: Callable[[], AsyncIterable[T]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Continues a stream with another stream once the first completes."""
+  async def _continue_with(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      yield item
+    async for item in f():
+      yield item
+
+  if stream is None:
+    return _continue_with
+  return _continue_with(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestContinueWith:
+  async def test_continues_with_stream(self):
+    result = await collect(pipe(
+      from_iter([1, 2]),
+      continue_with(lambda: from_iter([3, 4]))
+    ))
+    assert result == [1, 2, 3, 4]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -2779,6 +3391,29 @@ describe('concatAll', () => {
     expect(values).toEqual([])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def concat_all(stream_of_streams: AsyncIterable[AsyncIterable[T]]) -> AsyncIterator[T]:
+  """Flattens a stream of streams by concatenating them into a single stream."""
+  async for stream in stream_of_streams:
+    async for item in stream:
+      yield item
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestConcatAll:
+  async def test_flattens_stream_of_streams(self):
+    async def stream_of_streams():
+      yield from_iter([1, 2])
+      yield from_iter([3, 4])
+    
+    result = await collect(concat_all(stream_of_streams()))
+    assert result == [1, 2, 3, 4]
 #+end_src
 
 *** Rust Implementation
@@ -2922,6 +3557,46 @@ describe('concatMap', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def concat_map(
+  f: Callable[[T], AsyncIterable[U]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[U]]: ...
+@overload
+def concat_map(
+  f: Callable[[T], AsyncIterable[U]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[U]: ...
+
+def concat_map(
+  f: Callable[[T], AsyncIterable[U]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Maps each value to a stream and concatenates the results in order."""
+  async def _concat_map(s: AsyncIterable[T]) -> AsyncIterator[U]:
+    async for item in s:
+      async for inner_item in f(item):
+        yield inner_item
+
+  if stream is None:
+    return _concat_map
+  return _concat_map(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestConcatMap:
+  async def test_maps_and_concatenates(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      concat_map(lambda x: from_iter([x, x * 10]))
+    ))
+    assert result == [1, 10, 2, 20, 3, 30]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -3039,6 +3714,61 @@ describe('filter', () => {
     expect(result).toEqual([2, 4])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def filter(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def filter(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def filter(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Filters values based on a predicate function."""
+  async def _filter(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      result = predicate(item)
+      if asyncio.iscoroutine(result):
+        if await result:
+          yield item
+      elif result:
+        yield item
+
+  if stream is None:
+    return _filter
+  return _filter(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestFilter:
+  async def test_filters_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      filter(lambda x: x % 2 == 0)
+    ))
+    assert result == [2, 4]
+
+  async def test_async_predicate(self):
+    async def is_even(x):
+      await asyncio.sleep(0)
+      return x % 2 == 0
+    
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4]),
+      filter(is_even)
+    ))
+    assert result == [2, 4]
 #+end_src
 
 *** Rust Implementation
@@ -3192,6 +3922,29 @@ describe('skipRepeats', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def skip_repeats(stream: AsyncIterable[T]) -> AsyncIterator[T]:
+  """Filters out consecutive duplicate values from a stream."""
+  first = True
+  last_value: Optional[T] = None
+  async for item in stream:
+    if first or item != last_value:
+      yield item
+      last_value = item
+      first = False
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestSkipRepeats:
+  async def test_removes_consecutive_duplicates(self):
+    result = await collect(skip_repeats(from_iter([1, 1, 2, 2, 3, 1, 1])))
+    assert result == [1, 2, 3, 1]
+#+end_src
+
 *** Rust Implementation
 
 =StreamExt::dedup= doesn't exist by default; use =itertools= or custom. Defined with =skipRepeatsWith= below.
@@ -3281,6 +4034,59 @@ describe('skipRepeatsWith', () => {
     expect(values).toEqual([1, 2])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def skip_repeats_with(
+  equals: Callable[[T, T], Union[bool, Awaitable[bool]]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def skip_repeats_with(
+  equals: Callable[[T, T], Union[bool, Awaitable[bool]]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def skip_repeats_with(
+  equals: Callable[[T, T], Union[bool, Awaitable[bool]]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Filters out consecutive duplicates using a custom equality function."""
+  async def _skip_repeats_with(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    first = True
+    last_value: Optional[T] = None
+    async for item in s:
+      if first:
+        yield item
+        last_value = item
+        first = False
+      else:
+        result = equals(item, last_value) # type: ignore
+        if asyncio.iscoroutine(result):
+          is_equal = await result
+        else:
+          is_equal = result
+        if not is_equal:
+          yield item
+          last_value = item
+
+  if stream is None:
+    return _skip_repeats_with
+  return _skip_repeats_with(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestSkipRepeatsWith:
+  async def test_custom_equality(self):
+    result = await collect(pipe(
+      from_iter(["A", "a", "B", "b"]),
+      skip_repeats_with(lambda a, b: a.lower() == b.lower())
+    ))
+    assert result == ["A", "B"]
 #+end_src
 
 *** Rust Implementation
@@ -3428,6 +4234,42 @@ describe('take', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def take(n: int) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def take(n: int, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def take(n: int, stream: Optional[AsyncIterable[T]] = None):
+  """Takes only the first n values from a stream."""
+  async def _take(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    count = 0
+    async for item in s:
+      if count < n:
+        yield item
+        count += 1
+      else:
+        break
+
+  if stream is None:
+    return _take
+  return _take(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestTake:
+  async def test_takes_n_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      take(3)
+    ))
+    assert result == [1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 =StreamExt::take= is built-in. This standalone function is provided for pipe-style composition:
@@ -3561,6 +4403,40 @@ describe('skip', () => {
     expect(result).toEqual([3, 4, 5])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def skip(n: int) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def skip(n: int, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def skip(n: int, stream: Optional[AsyncIterable[T]] = None):
+  """Skips the first n values from a stream."""
+  async def _skip(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    count = 0
+    async for item in s:
+      if count >= n:
+        yield item
+      count += 1
+
+  if stream is None:
+    return _skip
+  return _skip(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestSkip:
+  async def test_skips_n_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      skip(2)
+    ))
+    assert result == [3, 4, 5]
 #+end_src
 
 *** Rust Implementation
@@ -3704,6 +4580,42 @@ describe('slice', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def slice(start: int, end: int) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def slice(start: int, end: int, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def slice(start: int, end: int, stream: Optional[AsyncIterable[T]] = None):
+  """Emits values from index start to end (exclusive)."""
+  async def _slice(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    index = 0
+    async for item in s:
+      if index >= start and index < end:
+        yield item
+      index += 1
+      if index >= end:
+        break
+
+  if stream is None:
+    return _slice
+  return _slice(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestSlice:
+  async def test_extracts_slice(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      slice(1, 4)
+    ))
+    assert result == [2, 3, 4]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -3828,6 +4740,54 @@ describe('takeWhile', () => {
     expect(values).toEqual(['a', 'b'])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def take_while(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def take_while(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def take_while(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Takes values while predicate returns true, stops at first false."""
+  async def _take_while(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      result = predicate(item)
+      if asyncio.iscoroutine(result):
+        if await result:
+          yield item
+        else:
+          break
+      elif result:
+        yield item
+      else:
+        break
+
+  if stream is None:
+    return _take_while
+  return _take_while(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestTakeWhile:
+  async def test_takes_while_true(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 1]),
+      take_while(lambda x: x < 4)
+    ))
+    assert result == [1, 2, 3]
 #+end_src
 
 *** Rust Implementation
@@ -3967,6 +4927,56 @@ describe('skipWhile', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def skip_while(
+ predicate: Callable[[T], Union[bool, Awaitable[bool]]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def skip_while(
+ predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+ stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def skip_while(
+ predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+ stream: Optional[AsyncIterable[T]] = None
+):
+  """Skips values while predicate is true, then emits the rest."""
+  async def _skip_while(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    skipping = True
+    async for item in s:
+      if skipping:
+        result = predicate(item)
+        if asyncio.iscoroutine(result):
+          should_skip = await result
+        else:
+          should_skip = result
+        if not should_skip:
+          skipping = False
+          yield item
+      else:
+        yield item
+
+  if stream is None:
+    return _skip_while
+  return _skip_while(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestSkipWhile:
+  async def test_skips_while_true(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 1]),
+      skip_while(lambda x: x < 3)
+    ))
+    assert result == [3, 4, 1]
+#+end_src
+
 *** Rust Implementation
 
 =StreamExt::skip_while= is built-in. This standalone function is provided for pipe-style composition:
@@ -4104,6 +5114,51 @@ describe('takeUntil', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def take_until(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def take_until(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def take_until(
+  predicate: Callable[[T], Union[bool, Awaitable[bool]]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Takes values until predicate matches (matching value not emitted)."""
+  async def _take_until(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      result = predicate(item)
+      if asyncio.iscoroutine(result):
+        if await result:
+          break
+      elif result:
+        break
+      yield item
+
+  if stream is None:
+    return _take_until
+  return _take_until(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestTakeUntil:
+  async def test_takes_until(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      take_until(lambda x: x == 3)
+    ))
+    assert result == [1, 2]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -4234,6 +5289,38 @@ describe('delay', () => {
     expect(values).toEqual([1, 2])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def delay(seconds: float) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def delay(seconds: float, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def delay(seconds: float, stream: Optional[AsyncIterable[T]] = None):
+  """Delays each value by a specified duration."""
+  async def _delay(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    async for item in s:
+      await asyncio.sleep(seconds)
+      yield item
+
+  if stream is None:
+    return _delay
+  return _delay(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestDelay:
+  async def test_delays_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3]),
+      delay(0.01)
+    ))
+    assert result == [1, 2, 3]
 #+end_src
 
 *** Rust Implementation
@@ -4446,6 +5533,66 @@ describe('debounce', () => {
     expect(values).toEqual([1])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def debounce(seconds: float) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def debounce(seconds: float, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def debounce(seconds: float, stream: Optional[AsyncIterable[T]] = None):
+  """Only emits a value if no new value arrives within the specified duration."""
+  async def _debounce(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    pending: Optional[T] = None
+    pending_task: Optional[asyncio.Task] = None
+    done = False
+    result_queue: asyncio.Queue[Optional[T]] = asyncio.Queue()
+
+    async def emit_after_delay(value: T):
+      await asyncio.sleep(seconds)
+      await result_queue.put(value)
+
+    async def consume_source():
+      nonlocal pending, pending_task, done
+      async for item in s:
+        if pending_task:
+          pending_task.cancel()
+          try:
+            await pending_task
+          except asyncio.CancelledError:
+            pass
+        pending = item
+        pending_task = asyncio.create_task(emit_after_delay(item))
+      done = True
+      if pending_task:
+        try:
+          await pending_task
+        except asyncio.CancelledError:
+          pass
+      await result_queue.put(None) # Signal completion
+
+    consumer_task = asyncio.create_task(consume_source())
+
+    while True:
+      value = await result_queue.get()
+      if value is None:
+        break
+      yield value
+
+    await consumer_task
+
+  if stream is None:
+    return _debounce
+  return _debounce(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -4713,6 +5860,77 @@ describe('throttle', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@dataclass
+class ThrottleOptions:
+  """Options for throttle behavior."""
+  leading: bool = True
+  trailing: bool = True
+
+
+@overload
+def throttle(
+  seconds: float,
+  options: Optional[ThrottleOptions] = None
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def throttle(
+  seconds: float,
+  options: Optional[ThrottleOptions],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def throttle(
+  seconds: float,
+  options: Optional[ThrottleOptions] = None,
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Limits the rate of emissions with leading/trailing edge control."""
+  opts = options or ThrottleOptions()
+
+  async def _throttle(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    import time
+    last_emit_time = 0.0
+    trailing_value: Optional[T] = None
+    has_trailing = False
+
+    async for item in s:
+      now = time.time()
+      elapsed = now - last_emit_time
+
+      if elapsed >= seconds:
+        if opts.leading:
+          yield item
+          last_emit_time = now
+          has_trailing = False
+        else:
+          trailing_value = item
+          has_trailing = True
+      else:
+        trailing_value = item
+        has_trailing = True
+
+    if has_trailing and opts.trailing:
+      yield trailing_value # type: ignore
+
+  if stream is None:
+    if options is None:
+      return _throttle
+    # Handle case where options might be the stream
+    if hasattr(options, '__aiter__'):
+      return _throttle(options) # type: ignore
+    return _throttle
+  return _throttle(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -4930,6 +6148,53 @@ describe('recoverWith', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def recover_with(
+  recover_fn: Callable[[Exception], AsyncIterable[T]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def recover_with(
+  recover_fn: Callable[[Exception], AsyncIterable[T]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def recover_with(
+  recover_fn: Callable[[Exception], AsyncIterable[T]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Recovers from errors by switching to an alternative stream."""
+  async def _recover_with(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    try:
+      async for item in s:
+        yield item
+    except Exception as e:
+      async for item in recover_fn(e):
+        yield item
+
+  if stream is None:
+    return _recover_with
+  return _recover_with(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestRecoverWith:
+  async def test_recovers_from_error(self):
+    async def failing_stream():
+      yield 1
+      raise ValueError("oops")
+    
+    result = await collect(pipe(
+      failing_stream(),
+      recover_with(lambda e: from_iter([99]))
+    ))
+    assert result == [1, 99]
+#+end_src
+
 *** Rust Implementation
 
 In Rust, we use =Result= types for error handling in streams:
@@ -5055,6 +6320,18 @@ export async function* recoverWithStream<T>(
     }
   }
 }
+#+end_src
+
+*** TODO Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -5191,6 +6468,24 @@ describe('throwError', () => {
       .toErrorWith('test error')
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def throw_error(error: Exception) -> AsyncIterator[Any]:
+  """Creates a stream that immediately throws an error."""
+  raise error
+  yield # Makes this a generator
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestThrowError:
+  async def test_throws_error(self):
+    with pytest.raises(ValueError, match="oops"):
+      await collect(throw_error(ValueError("oops")))
 #+end_src
 
 *** Rust Implementation
@@ -5384,6 +6679,76 @@ describe('retry', () => {
     expect(attempts).toBe(2)
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@dataclass
+class RetryOptions:
+  """Options for retry behavior."""
+  max_attempts: int = 3
+  delay_seconds: float = 0.0
+  should_retry: Optional[Callable[[Exception, int], bool]] = None
+
+
+@overload
+def retry(
+  options: Union[RetryOptions, int]
+) -> Callable[[Callable[[], AsyncIterable[T]]], AsyncIterator[T]]: ...
+@overload
+def retry(
+  options: Union[RetryOptions, int],
+  stream_factory: Callable[[], AsyncIterable[T]]
+) -> AsyncIterator[T]: ...
+
+def retry(
+  options: Union[RetryOptions, int],
+  stream_factory: Optional[Callable[[], AsyncIterable[T]]] = None
+):
+  """Retries a stream factory when it errors."""
+  opts = RetryOptions(max_attempts=options) if isinstance(options, int) else options
+
+  async def _retry(factory: Callable[[], AsyncIterable[T]]) -> AsyncIterator[T]:
+    attempt = 0
+    while True:
+      try:
+        async for item in factory():
+          yield item
+        return # Success
+      except Exception as e:
+        attempt += 1
+        should_retry = opts.should_retry(e, attempt) if opts.should_retry else True
+        if attempt >= opts.max_attempts or not should_retry:
+          raise
+        if opts.delay_seconds > 0:
+          await asyncio.sleep(opts.delay_seconds)
+
+  if stream_factory is None:
+    return _retry
+  return _retry(stream_factory)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestRetry:
+  async def test_retries_until_success(self):
+    attempt = 0
+    
+    def create_stream():
+      nonlocal attempt
+      attempt += 1
+      async def stream():
+        if attempt < 3:
+          yield attempt
+          raise ValueError(f"fail {attempt}")
+        else:
+          yield attempt
+      return stream()
+    
+    result = await collect(retry(3, create_stream))
+    assert result == [1, 2, 3]
 #+end_src
 
 *** Rust Implementation
@@ -5719,6 +7084,59 @@ describe('merge', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def merge(*streams: AsyncIterable[T]) -> AsyncIterator[T]:
+  """Merges multiple streams into one, emitting values as they arrive."""
+  async def consume_stream(
+    stream: AsyncIterable[T],
+    queue: asyncio.Queue[Tuple[int, Optional[T], bool, Optional[Exception]]],
+    index: int
+  ):
+    try:
+      async for item in stream:
+        await queue.put((index, item, False, None))
+      await queue.put((index, None, True, None)) # Signal completion
+    except Exception as e:
+      await queue.put((index, None, True, e))
+
+  queue: asyncio.Queue[Tuple[int, Optional[T], bool, Optional[Exception]]] = asyncio.Queue()
+  tasks = [asyncio.create_task(consume_stream(stream, queue, i)) for i, stream in enumerate(streams)]
+
+  active = len(streams)
+  try:
+    while active > 0:
+      index, value, done, error = await queue.get()
+      if error:
+        raise error
+      if done:
+        active -= 1
+      else:
+        yield value # type: ignore
+  finally:
+    for task in tasks:
+      task.cancel()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestMerge:
+  async def test_merges_streams(self):
+    async def slow_stream():
+      yield 1
+      await asyncio.sleep(0.02)
+      yield 3
+    
+    async def fast_stream():
+      await asyncio.sleep(0.01)
+      yield 2
+    
+    result = await collect(merge(slow_stream(), fast_stream()))
+    assert sorted(result) == [1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 The =futures= crate provides built-in merge functionality that is runtime-agnostic. We re-export these as =merge= and =merge_all= for API consistency:
@@ -5848,6 +7266,67 @@ describe('mergeAll', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def merge_all(stream_of_streams: AsyncIterable[AsyncIterable[T]]) -> AsyncIterator[T]:
+  """Flattens a stream of streams by merging them concurrently."""
+  queue: asyncio.Queue[Tuple[Optional[T], bool, Optional[Exception]]] = asyncio.Queue()
+  active_count = 0
+  outer_done = False
+  tasks: List[asyncio.Task] = []
+
+  async def consume_inner(stream: AsyncIterable[T]):
+    nonlocal active_count
+    try:
+      async for item in stream:
+        await queue.put((item, False, None))
+    except Exception as e:
+      await queue.put((None, True, e))
+    finally:
+      active_count -= 1
+      if outer_done and active_count == 0:
+        await queue.put((None, True, None)) # All done
+
+  async def consume_outer():
+    nonlocal outer_done, active_count
+    async for inner_stream in stream_of_streams:
+      active_count += 1
+      task = asyncio.create_task(consume_inner(inner_stream))
+      tasks.append(task)
+    outer_done = True
+    if active_count == 0:
+      await queue.put((None, True, None)) # No inner streams
+
+  outer_task = asyncio.create_task(consume_outer())
+  tasks.append(outer_task)
+
+  try:
+    while True:
+      value, done, error = await queue.get()
+      if error:
+        raise error
+      if done:
+        break
+      yield value # type: ignore
+  finally:
+    for task in tasks:
+      task.cancel()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestMergeAll:
+  async def test_merges_stream_of_streams(self):
+    async def stream_of_streams():
+      yield from_iter([1, 2])
+      yield from_iter([3, 4])
+    
+    result = await collect(merge_all(stream_of_streams()))
+    assert sorted(result) == [1, 2, 3, 4]
+#+end_src
+
 *** Rust Implementation
 
 =StreamExt::flatten_unordered= provides concurrent flattening:
@@ -5963,6 +7442,52 @@ describe('chain / flatMap', () => {
     expect(flatMap).toBe(chain)
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def chain(
+  fn: Callable[[T], AsyncIterable[U]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[U]]: ...
+@overload
+def chain(
+  fn: Callable[[T], AsyncIterable[U]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[U]: ...
+
+def chain(
+  fn: Callable[[T], AsyncIterable[U]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Maps each value to a stream and merges results concurrently."""
+  async def _chain(s: AsyncIterable[T]) -> AsyncIterator[U]:
+    async def mapped_streams():
+      async for item in s:
+        yield fn(item)
+
+    async for result in merge_all(mapped_streams()):
+      yield result
+
+  if stream is None:
+    return _chain
+  return _chain(stream)
+
+# Alias for chain
+flat_map = chain
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestChain:
+  async def test_maps_and_merges(self):
+    result = await collect(pipe(
+      from_iter([1, 2]),
+      chain(lambda x: from_iter([x, x * 10]))
+    ))
+    assert sorted(result) == [1, 2, 10, 20]
 #+end_src
 
 *** Rust Implementation
@@ -6172,6 +7697,83 @@ describe('switchMap', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def switch_map(
+  fn: Callable[[T], AsyncIterable[U]]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[U]]: ...
+@overload
+def switch_map(
+  fn: Callable[[T], AsyncIterable[U]],
+  stream: AsyncIterable[T]
+) -> AsyncIterator[U]: ...
+
+def switch_map(
+  fn: Callable[[T], AsyncIterable[U]],
+  stream: Optional[AsyncIterable[T]] = None
+):
+  """Maps each value to a stream, cancelling previous inner stream on new outer value."""
+  async def _switch_map(s: AsyncIterable[T]) -> AsyncIterator[U]:
+    current_task: Optional[asyncio.Task] = None
+    queue: asyncio.Queue[Tuple[Optional[U], bool, bool]] = asyncio.Queue()
+    outer_done = False
+
+    async def consume_inner(inner: AsyncIterable[U], generation: int):
+      try:
+        async for item in inner:
+          await queue.put((item, False, False))
+      except asyncio.CancelledError:
+        pass
+      finally:
+        await queue.put((None, True, False)) # Inner done
+
+    async def consume_outer(s: AsyncIterable[T]):
+      nonlocal current_task, outer_done
+      generation = 0
+      async for item in s:
+        if current_task:
+          current_task.cancel()
+        generation += 1
+        current_task = asyncio.create_task(consume_inner(fn(item), generation))
+      outer_done = True
+      await queue.put((None, False, True)) # Outer done
+
+    outer_task = asyncio.create_task(consume_outer(s))
+    inner_done = True
+
+    try:
+      while True:
+        value, is_inner_done, is_outer_done = await queue.get()
+        if is_outer_done and inner_done:
+          break
+        if is_inner_done:
+          inner_done = True
+          if outer_done:
+            break
+        elif is_outer_done:
+          if inner_done:
+            break
+        else:
+          inner_done = False
+          yield value # type: ignore
+    finally:
+      outer_task.cancel()
+      if current_task:
+        current_task.cancel()
+
+  if stream is None:
+    return _switch_map
+  return _switch_map(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -6342,6 +7944,66 @@ describe('latest', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def latest(*streams: AsyncIterable[T]) -> AsyncIterator[Tuple[T, ...]]:
+  """Combines streams, emitting tuple of latest values when any emits."""
+  latest_values: List[Optional[T]] = [None] * len(streams)
+  has_value: List[bool] = [False] * len(streams)
+  queue: asyncio.Queue[Tuple[int, Optional[T], bool, Optional[Exception]]] = asyncio.Queue()
+
+  async def consume_stream(stream: AsyncIterable[T], index: int):
+    try:
+      async for item in stream:
+        await queue.put((index, item, False, None))
+      await queue.put((index, None, True, None))
+    except Exception as e:
+      await queue.put((index, None, True, e))
+
+  tasks = [asyncio.create_task(consume_stream(stream, i)) for i, stream in enumerate(streams)]
+
+  active = len(streams)
+  try:
+    while active > 0:
+      index, value, done, error = await queue.get()
+      if error:
+        raise error
+      if done:
+        active -= 1
+      else:
+        latest_values[index] = value
+        has_value[index] = True
+        if all(has_value):
+          yield tuple(latest_values) # type: ignore
+  finally:
+    for task in tasks:
+      task.cancel()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestLatest:
+  async def test_combines_latest(self):
+    async def stream_a():
+      yield 1
+      await asyncio.sleep(0.02)
+      yield 2
+    
+    async def stream_b():
+      await asyncio.sleep(0.01)
+      yield "a"
+      await asyncio.sleep(0.02)
+      yield "b"
+    
+    result = await collect(latest(stream_a(), stream_b()))
+    # After first emit from both: (1, "a")
+    # After 2 from a: (2, "a") 
+    # After "b" from b: (2, "b")
+    assert len(result) >= 1
+#+end_src
+
 *** Rust Implementation
 
 Using =futures::select!= for runtime-agnostic stream combination:
@@ -6472,6 +8134,24 @@ describe('applyLatest', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def apply_latest(
+  fn_stream: AsyncIterable[Callable[[T], U]],
+  value_stream: AsyncIterable[T]
+) -> AsyncIterator[U]:
+  """Applies the latest function to the latest value."""
+  async for fn, value in latest(fn_stream, value_stream): # type: ignore
+    yield fn(value)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -6594,6 +8274,53 @@ describe('untilStream', () => {
     expect(values.length).toBeLessThanOrEqual(5)
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def until_stream(
+  stop_stream: AsyncIterable[Any]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def until_stream(
+  stop_stream: AsyncIterable[Any],
+  source_stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def until_stream(
+  stop_stream: AsyncIterable[Any],
+  source_stream: Optional[AsyncIterable[T]] = None
+):
+  """Emits from source until stop stream emits."""
+  async def _until_stream(source: AsyncIterable[T]) -> AsyncIterator[T]:
+    stop_signal = asyncio.Event()
+
+    async def watch_stop():
+      async for _ in stop_stream:
+        stop_signal.set()
+        break
+
+    stop_task = asyncio.create_task(watch_stop())
+
+    try:
+      async for item in source:
+        if stop_signal.is_set():
+          break
+        yield item
+    finally:
+      stop_task.cancel()
+
+  if source_stream is None:
+    return _until_stream
+  return _until_stream(source_stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -6734,6 +8461,52 @@ describe('sinceStream', () => {
     expect(Array.isArray(values)).toBe(true)
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def since_stream(
+  start_stream: AsyncIterable[Any]
+) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def since_stream(
+  start_stream: AsyncIterable[Any],
+  source_stream: AsyncIterable[T]
+) -> AsyncIterator[T]: ...
+
+def since_stream(
+  start_stream: AsyncIterable[Any],
+  source_stream: Optional[AsyncIterable[T]] = None
+):
+  """Emits from source only after start stream emits."""
+  async def _since_stream(source: AsyncIterable[T]) -> AsyncIterator[T]:
+    started = asyncio.Event()
+
+    async def watch_start():
+      async for _ in start_stream:
+        started.set()
+        break
+
+    start_task = asyncio.create_task(watch_start())
+
+    try:
+      async for item in source:
+        if started.is_set():
+          yield item
+    finally:
+      start_task.cancel()
+
+  if source_stream is None:
+    return _since_stream
+  return _since_stream(source_stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -6878,6 +8651,43 @@ describe('buffer', () => {
     expect(values).toEqual([[1, 2], [3, 4]])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def buffer(size: int) -> Callable[[AsyncIterable[T]], AsyncIterator[List[T]]]: ...
+@overload
+def buffer(size: int, stream: AsyncIterable[T]) -> AsyncIterator[List[T]]: ...
+
+def buffer(size: int, stream: Optional[AsyncIterable[T]] = None):
+  """Collects values into lists of the specified size."""
+  async def _buffer(s: AsyncIterable[T]) -> AsyncIterator[List[T]]:
+    buf: List[T] = []
+    async for item in s:
+      buf.append(item)
+      if len(buf) >= size:
+        yield buf
+        buf = []
+    if buf:
+      yield buf
+
+  if stream is None:
+    return _buffer
+  return _buffer(stream)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestBuffer:
+  async def test_buffers_values(self):
+    result = await collect(pipe(
+      from_iter([1, 2, 3, 4, 5]),
+      buffer(2)
+    ))
+    assert result == [[1, 2], [3, 4], [5]]
 #+end_src
 
 *** Rust Implementation
@@ -7052,6 +8862,64 @@ describe('bufferTime', () => {
     expect(values.flat()).toEqual([1, 2])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def buffer_time(seconds: float) -> Callable[[AsyncIterable[T]], AsyncIterator[List[T]]]: ...
+@overload
+def buffer_time(seconds: float, stream: AsyncIterable[T]) -> AsyncIterator[List[T]]: ...
+
+def buffer_time(seconds: float, stream: Optional[AsyncIterable[T]] = None):
+  """Collects values over a time window."""
+  async def _buffer_time(s: AsyncIterable[T]) -> AsyncIterator[List[T]]:
+    buf: List[T] = []
+    done = False
+    queue: asyncio.Queue[Tuple[Optional[T], bool, bool]] = asyncio.Queue()
+
+    async def timer():
+      while not done:
+        await asyncio.sleep(seconds)
+        await queue.put((None, True, False)) # Timer tick
+
+    async def consume():
+      nonlocal done
+      async for item in s:
+        await queue.put((item, False, False))
+      done = True
+      await queue.put((None, False, True)) # Source done
+
+    timer_task = asyncio.create_task(timer())
+    consume_task = asyncio.create_task(consume())
+
+    try:
+      while True:
+        value, is_tick, is_done = await queue.get()
+        if is_done:
+          if buf:
+            yield buf
+          break
+        elif is_tick:
+          if buf:
+            yield buf
+            buf = []
+        else:
+          buf.append(value) # type: ignore
+    finally:
+      timer_task.cancel()
+      consume_task.cancel()
+
+  if stream is None:
+    return _buffer_time
+  return _buffer_time(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -7277,6 +9145,34 @@ describe('window', () => {
     expect(windows.length).toBe(2)
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def window(size: int) -> Callable[[AsyncIterable[T]], AsyncIterator[AsyncIterable[T]]]: ...
+@overload
+def window(size: int, stream: AsyncIterable[T]) -> AsyncIterator[AsyncIterable[T]]: ...
+
+def window(size: int, stream: Optional[AsyncIterable[T]] = None):
+  """Splits the source into windows of the specified size."""
+  async def _window(s: AsyncIterable[T]) -> AsyncIterator[AsyncIterable[T]]:
+    async for batch in buffer(size, s):
+      async def window_stream(items: List[T]) -> AsyncIterator[T]:
+        for item in items:
+          yield item
+      yield window_stream(batch)
+
+  if stream is None:
+    return _window
+  return _window(stream)
+#+end_src
+
+**** TODO Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -7557,6 +9453,106 @@ describe('eagerNow', () => {
     expect(values).toEqual([1, 2, 3])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+@overload
+def eager(buffer_size: int) -> Callable[[AsyncIterable[T]], AsyncIterator[T]]: ...
+@overload
+def eager(buffer_size: int, stream: AsyncIterable[T]) -> AsyncIterator[T]: ...
+
+def eager(buffer_size: int, stream: Optional[AsyncIterable[T]] = None):
+  """Pre-fetches values from a slow producer into a buffer."""
+  async def _eager(s: AsyncIterable[T]) -> AsyncIterator[T]:
+    queue: asyncio.Queue[Tuple[Optional[T], bool, Optional[Exception]]] = asyncio.Queue(
+      maxsize=buffer_size if buffer_size > 0 else 0
+    )
+
+    async def consume():
+      try:
+        async for item in s:
+          await queue.put((item, False, None))
+        await queue.put((None, True, None))
+      except Exception as e:
+        await queue.put((None, True, e))
+
+    task = asyncio.create_task(consume())
+
+    try:
+      while True:
+        value, done, error = await queue.get()
+        if error:
+          raise error
+        if done:
+          break
+        yield value # type: ignore
+    finally:
+      task.cancel()
+
+  if stream is None:
+    return _eager
+  return _eager(stream)
+
+def eager_now(buffer_size: int, stream: AsyncIterable[T]) -> AsyncIterable[T]:
+  """Pre-fetches values immediately on creation."""
+  queue: asyncio.Queue[Tuple[Optional[T], bool, Optional[Exception]]] = asyncio.Queue(
+    maxsize=buffer_size if buffer_size > 0 else 0
+  )
+  started = False
+  task: Optional[asyncio.Task] = None
+
+  async def consume():
+    try:
+      async for item in stream:
+        await queue.put((item, False, None))
+      await queue.put((None, True, None))
+    except Exception as e:
+      await queue.put((None, True, e))
+
+  async def start():
+    nonlocal started, task
+    if not started:
+      started = True
+      task = asyncio.create_task(consume())
+
+  # Start immediately
+  asyncio.get_event_loop().call_soon(lambda: asyncio.create_task(start()))
+
+  async def iterate() -> AsyncIterator[T]:
+    await start()
+    while True:
+      value, done, error = await queue.get()
+      if error:
+        raise error
+      if done:
+        break
+      yield value # type: ignore
+
+  return iterate()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestEager:
+  async def test_prefetches_values(self):
+    events = []
+    
+    async def slow_producer():
+      for i in range(3):
+        events.append(f"produce_{i}")
+        yield i
+    
+    stream = pipe(
+      slow_producer(),
+      eager(10)
+    )
+    
+    events.append("created")
+    result = await collect(stream)
+    assert result == [0, 1, 2]
 #+end_src
 
 *** Rust Implementation
@@ -7841,6 +9837,98 @@ describe('ReplaySubject', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+class ReplaySubject(Generic[T]):
+  """A multicasting subject that replays buffered values to new subscribers."""
+
+  def __init__(self, buffer_size: int = float('inf')): # type: ignore
+    self._buffer: deque[T] = deque(maxlen=buffer_size if buffer_size != float('inf') else None)
+    self._subscribers: List[asyncio.Queue[Tuple[Optional[T], bool, Optional[Exception]]]] = []
+    self._completed = False
+    self._error: Optional[Exception] = None
+
+  def next(self, value: T) -> None:
+    """Push a value to all subscribers."""
+    if self._completed:
+      raise RuntimeError("Cannot push to completed ReplaySubject")
+
+    self._buffer.append(value)
+    for sub in self._subscribers:
+      sub.put_nowait((value, False, None))
+
+  def complete(self) -> None:
+    """Signal completion to all subscribers."""
+    self._completed = True
+    for sub in self._subscribers:
+      sub.put_nowait((None, True, None))
+
+  def throw(self, error: Exception) -> None:
+    """Signal an error to all subscribers."""
+    self._error = error
+    self._completed = True
+    for sub in self._subscribers:
+      sub.put_nowait((None, True, error))
+
+  def __aiter__(self) -> AsyncIterator[T]:
+    queue: asyncio.Queue[Tuple[Optional[T], bool, Optional[Exception]]] = asyncio.Queue()
+
+    # Add buffered values
+    for value in self._buffer:
+      queue.put_nowait((value, False, None))
+
+    if self._completed:
+      queue.put_nowait((None, True, self._error))
+    else:
+      self._subscribers.append(queue)
+
+    async def iterate() -> AsyncIterator[T]:
+      try:
+        while True:
+          value, done, error = await queue.get()
+          if error:
+            raise error
+          if done:
+            break
+          yield value # type: ignore
+      finally:
+        if queue in self._subscribers:
+          self._subscribers.remove(queue)
+
+    return iterate()
+
+  def get_buffer(self) -> List[T]:
+    """Get the current buffer contents."""
+    return list(self._buffer)
+
+  @property
+  def subscriber_count(self) -> int:
+    """Number of active subscribers."""
+    return len(self._subscribers)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestReplaySubject:
+  async def test_replays_to_new_subscribers(self):
+    subject = ReplaySubject[int](buffer_size=10)
+    subject.next(1)
+    subject.next(2)
+    
+    result = await collect_n(2, subject)
+    assert result == [1, 2]
+
+  async def test_buffers_limited(self):
+    subject = ReplaySubject[int](buffer_size=2)
+    subject.next(1)
+    subject.next(2)
+    subject.next(3)
+    
+    assert subject.get_buffer() == [2, 3]
+#+end_src
+
 *** Rust Implementation
 
 Runtime-agnostic implementation using =futures::channel= and =async-lock=:
@@ -8077,6 +10165,48 @@ describe('replay', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+def replay(buffer_size: int, source: AsyncIterable[T]) -> AsyncIterable[T]:
+  """Makes a stream consumable by multiple consumers by buffering values."""
+  subject = ReplaySubject[T](buffer_size)
+  started = False
+
+  async def start_source():
+    nonlocal started
+    if started:
+      return
+    started = True
+
+    try:
+      async for value in source:
+        subject.next(value)
+      subject.complete()
+    except Exception as e:
+      subject.throw(e)
+
+  class ReplayIterable:
+    def __aiter__(self):
+      asyncio.create_task(start_source())
+      return subject.__aiter__()
+
+  return ReplayIterable()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestReplay:
+  async def test_replays_buffered(self):
+    source = from_iter([1, 2, 3])
+    replayed = replay(10, source)
+    
+    result1 = await collect(replayed)
+    # Second subscriber would get replayed values
+    assert result1 == [1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -8274,6 +10404,26 @@ describe('share', () => {
 })
 #+end_src
 
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+def share(source: AsyncIterable[T]) -> AsyncIterable[T]:
+  """Shares a stream without buffering."""
+  return replay(0, source)
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+class TestShare:
+  async def test_shares_without_buffer(self):
+    source = from_iter([1, 2, 3])
+    shared = share(source)
+    
+    result = await collect(shared)
+    assert result == [1, 2, 3]
+#+end_src
+
 *** Rust Implementation
 
 #+begin_src rust :tangle rust/src/lib.rs
@@ -8424,6 +10574,43 @@ describe('replayFactory', () => {
     expect(copy2).toEqual([4, 5])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+def replay_factory(
+  buffer_size: int,
+  source: AsyncIterable[T]
+) -> Callable[[], AsyncIterable[T]]:
+  """Creates a factory that produces independent copies of a buffered stream."""
+  subject = ReplaySubject[T](buffer_size)
+  started = False
+
+  async def start_source():
+    nonlocal started
+    if started:
+      return
+    started = True
+
+    try:
+      async for value in source:
+        subject.next(value)
+      subject.complete()
+    except Exception as e:
+      subject.throw(e)
+
+  def factory() -> AsyncIterable[T]:
+    asyncio.create_task(start_source())
+    return subject
+
+  return factory
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -8627,6 +10814,25 @@ describe('replayStream', () => {
     expect(values).toEqual([1, 2, 3])
   })
 })
+#+end_src
+
+*** Python Implementation
+
+#+begin_src python :tangle python/agent_rex.py
+async def replay_stream(
+  buffer_size: int,
+  source: AsyncIterable[T]
+) -> AsyncIterator[AsyncIterable[T]]:
+  """Returns a stream that emits independent copies of the source stream."""
+  factory = replay_factory(buffer_size, source)
+  while True:
+    yield factory()
+#+end_src
+
+**** Tests
+
+#+begin_src python :tangle python/test_agent_rex.py
+
 #+end_src
 
 *** Rust Implementation
@@ -9234,7 +11440,8 @@ npm --version#+end_src
 
 #+begin_src shell :tangle no
 cd typescript
-npm install#+end_src
+npm install
+#+end_src
 
 **** Running Tests
 
@@ -9246,7 +11453,8 @@ npm test
 npm run test:run
 
 # Run tests with coverage
-npm run test:coverage#+end_src
+npm run test:coverage
+#+end_src
 
 **** Building for Distribution
 
@@ -9255,7 +11463,8 @@ npm run test:coverage#+end_src
 npx tsc
 
 # Output will be in dist/
-ls dist/#+end_src
+ls dist/
+#+end_src
 
 **** Publishing to npm
 
@@ -9264,7 +11473,117 @@ ls dist/#+end_src
 npm login
 
 # Update version in package.json, then:
-npm publish#+end_src
+npm publish
+#+end_src
+
+*** Python
+
+**** Prerequisites
+
+#+begin_src shell :tangle no
+# Ensure Python 3.8+ and pip are installed
+python --version
+pip --version
+#+end_src
+
+**** Project Configuration
+
+#+begin_src toml :tangle python/pyproject.toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-rex"
+version = "0.1.0"
+description = "An Async Generator/Iterator Based FRP-Like Library for Python"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = ["async", "reactive", "streams", "frp", "generators"]
+authors = [
+    { name = "Tim Wilson", email = "tim@example.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "mypy>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/agent-rex"
+Issues = "https://github.com/example/agent-rex/issues"
+Source = "https://github.com/example/agent-rex"
+
+[tool.hatch.build.targets.wheel]
+include = ["agent_rex.py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+strict = true
+#+end_src
+
+**** Exports
+
+#+begin_src python :tangle python/agent_rex.py
+__all__ = [
+  # Creation
+  'just', 'of', 'from_promise', 'from_iter', 'periodic', 'empty', 'never',
+  'iterate', 'unfold', 'start_with', 'concat',
+
+  # Composition
+  'pipe',
+
+  # Transformation
+  'map', 'constant', 'scan', 'tap', 'await_tap', 'continue_with',
+  'concat_all', 'concat_map',
+
+  # Filtering
+  'filter', 'skip_repeats', 'skip_repeats_with',
+
+  # Slicing
+  'take', 'skip', 'slice', 'take_while', 'skip_while', 'take_until',
+
+  # Time
+  'delay', 'debounce', 'throttle', 'ThrottleOptions',
+
+  # Error handling
+  'recover_with', 'throw_error', 'retry', 'RetryOptions',
+
+  # Concurrent
+  'merge', 'merge_all', 'chain', 'flat_map', 'switch_map',
+  'latest', 'apply_latest', 'until_stream', 'since_stream',
+
+  # Buffering
+  'buffer', 'buffer_time', 'window', 'eager', 'eager_now',
+
+  # Multicasting
+  'ReplaySubject', 'replay', 'share', 'replay_factory', 'replay_stream',
+
+  # Types
+  'UnfoldResult',
+]
+#+end_src
 
 *** Rust
 
@@ -9273,7 +11592,8 @@ npm publish#+end_src
 #+begin_src shell :tangle no
 # Ensure Rust toolchain is installed (via rustup)
 rustc --version
-cargo --version#+end_src
+cargo --version
+#+end_src
 
 **** Building
 
@@ -9289,7 +11609,8 @@ cargo build --features smol-runtime
 cargo build --features async-std-runtime
 
 # Build in release mode
-cargo build --release#+end_src
+cargo build --release
+#+end_src
 
 **** Running Tests
 
@@ -9304,7 +11625,8 @@ cargo test --features tokio-runtime
 cargo test -- --nocapture
 
 # Run a specific test
-cargo test test_just#+end_src
+cargo test test_just
+#+end_src
 
 **** Documentation
 
@@ -9313,7 +11635,8 @@ cargo test test_just#+end_src
 cargo doc --open
 
 # Generate docs with all features
-cargo doc --all-features --open#+end_src
+cargo doc --all-features --open
+#+end_src
 
 **** Publishing to crates.io
 
@@ -9325,7 +11648,8 @@ cargo login
 cargo publish --dry-run
 
 # Publish
-cargo publish#+end_src
+cargo publish
+#+end_src
 
 **** Feature Flags
 
@@ -9343,6 +11667,7 @@ Example usage in =Cargo.toml=:
 [dependencies]
 agent-rex = { version = "0.1", features = ["tokio-runtime"] }
 #+end_src
+
 
 *** Tangling with Organjsm
 
@@ -9532,6 +11857,8 @@ pub type BoxedStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
 * Testing Infrastructure
 
+** Typescript
+
 This section provides test helpers for ergonomic testing of async generator streams.
 These helpers focus on three key areas:
 
@@ -9539,11 +11866,11 @@ These helpers focus on three key areas:
 2. *Stream Collection*: Collect stream values into arrays or with timing metadata
 3. *Assertions*: Custom matchers for stream behavior verification
 
-** Test Helpers
+*** Test Helpers
 
 The test helpers are designed to make testing async streams as intuitive as testing synchronous code.
 
-*** =TestScheduler=
+**** =TestScheduler=
 
 A virtual time scheduler for deterministic testing of time-based operations.
 This allows tests to run instantly without waiting for real time to pass.
@@ -9667,7 +11994,7 @@ export class TestScheduler {
 }
 #+end_src
 
-*** =TestStream=
+**** =TestStream=
 
 A controllable async generator for testing.
 Values can be pushed manually, allowing precise control over when emissions occur.
@@ -9777,7 +12104,7 @@ export class TestStream<T> implements AsyncIterable<T> {
 }
 #+end_src
 
-**** Tests
+***** Tests
 
 #+begin_src typescript :noweb-ref tests
 describe('TestStream', () => {
@@ -9797,7 +12124,7 @@ describe('TestStream', () => {
 })
 #+end_src
 
-*** =collect=
+**** =collect=
 
 Collectors for gathering stream values into arrays.
 Essential for making assertions about stream output.
@@ -9908,7 +12235,7 @@ export async function collectWithTimeout<T>(
 }
 #+end_src
 
-*** =marble=
+**** =marble=
 
 Marble testing helpers for visual stream descriptions.
 Inspired by RxJS marble diagrams.
@@ -10039,7 +12366,7 @@ export function parseMarble<T>(
 }
 #+end_src
 
-**** Tests
+***** Tests
 
 #+begin_src typescript :noweb-ref tests
 describe('marble', () => {
@@ -10064,7 +12391,7 @@ describe('collectWithTime', () => {
 })
 #+end_src
 
-*** =drainN=
+**** =drainN=
 
 Drain helpers for consuming streams without collecting values.
 
@@ -10092,7 +12419,7 @@ export async function drain<T>(stream: AsyncIterable<T>): Promise<void> {
 }
 #+end_src
 
-*** =spy=
+**** =spy=
 
 Spy wrappers for observing stream behavior in tests.
 
@@ -10204,7 +12531,7 @@ export function spy<T>(source: AsyncIterable<T>): StreamSpy<T> {
 }
 #+end_src
 
-**** Tests
+***** Tests
 
 #+begin_src typescript :noweb-ref tests
 describe('spy', () => {
@@ -10219,7 +12546,7 @@ describe('spy', () => {
 })
 #+end_src
 
-*** =expectStream=
+**** =expectStream=
 
 Fluent assertion helpers for testing stream behavior.
 
@@ -10345,7 +12672,7 @@ function arraysEqual<T>(a: T[], b: T[]): boolean {
 }
 #+end_src
 
-*** =createAsyncIterable=
+**** =createAsyncIterable=
 
 Utility for quickly creating async iterables from arrays with optional delays.
 
@@ -10386,7 +12713,7 @@ export async function* createAsyncIterable<T>(
 }
 #+end_src
 
-** Test File
+*** Test File
 
 The test file is assembled from all the =:noweb-ref tests= blocks scattered throughout this document.
 This keeps tests close to the code they test while producing a single test file.
@@ -10463,3 +12790,72 @@ import {
 <<tests>>
 #+end_src
 
+** Python
+
+This section will contain test helpers for the Python implementation.
+
+*** Helpers
+
+**** =collect=
+
+#+begin_src python :tangle python/test_agent_rex.py
+async def collect(stream: AsyncIterable[T]) -> List[T]:
+  """Collect all values from a stream into a list."""
+  return [value async for value in stream]
+#+end_src
+
+**** Tests
+
+#+begin_src python :noweb-ref python/test_agent_rex.py
+class TestCollect:
+  async def test_collects_all(self):
+    result = await collect(from_iter([1, 2, 3]))
+    assert result == [1, 2, 3]
+#+end_src
+
+**** =collect_n=
+
+#+begin_src python :tangle python/test_agent_rex.py
+async def collect_n(n: int, stream: AsyncIterable[T]) -> List[T]:
+  """Collect exactly N values from a stream."""
+  values: List[T] = []
+  async for value in stream:
+    values.append(value)
+    if len(values) >= n:
+      break
+  return values
+#+end_src
+
+**** Tests
+
+#+begin_src python :noweb-ref python/test_agent_rex.py
+class TestCollectN:
+  async def test_collects_n(self):
+    result = await collect_n(2, from_iter([1, 2, 3, 4, 5]))
+    assert result == [1, 2]
+#+end_src
+
+**** =drain=
+
+#+begin_src python :tangle python/test_agent_rex.py
+async def drain(stream: AsyncIterable[T]) -> None:
+  """Consume all values from a stream, discarding them."""
+  async for _ in stream:
+    pass
+#+end_src
+
+**** Tests
+
+#+begin_src python :noweb-ref python/test_agent_rex.py
+class TestDrain:
+  async def test_drains_stream(self):
+    drained = []
+    
+    async def tracked():
+      for i in [1, 2, 3]:
+        drained.append(i)
+        yield i
+    
+    await drain(tracked())
+    assert drained == [1, 2, 3]
+#+end_src
