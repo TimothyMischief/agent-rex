@@ -23705,6 +23705,12 @@ jobs:
         working-directory: target
         run: |
           TAG="v${{ inputs.version }}"
+          
+          # Delete existing tag if it exists (for re-pushed tags)
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+          
+          # Create and push new tag
           git tag -a "$TAG" -m "Release ${{ inputs.version }}"
           git push origin "$TAG"
 #+end_src
