@@ -113,3 +113,60 @@ jobs:
           # Create and push new tag
           git tag -a "$TAG" -m "Release ${{ inputs.version }}"
           git push origin "$TAG"
+
+      - name: Wait for target workflow to complete
+        env:
+          GH_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          REPO="${{ github.repository_owner }}/${{ inputs.target_repo }}"
+          
+          echo "Waiting for workflow to be triggered on $REPO for tag $TAG..."
+          sleep 10  # Give GitHub time to trigger the workflow
+          
+          # Find the workflow run triggered by our tag push
+          for attempt in $(seq 1 30); do
+            RUN_ID=$(gh api "repos/$REPO/actions/runs?event=push&branch=$TAG&per_page=5" \
+              --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)
+            
+            if [ -n "$RUN_ID" ]; then
+              echo "Found workflow run: $RUN_ID"
+              break
+            fi
+            
+            echo "Attempt $attempt: Workflow not found yet, waiting..."
+            sleep 5
+          done
+          
+          if [ -z "$RUN_ID" ]; then
+            echo "::warning::Could not find workflow run for $REPO tag $TAG"
+            exit 0  # Don't fail if we can't find the run (might be a CI-only repo like Swift)
+          fi
+          
+          # Poll until workflow completes
+          echo "Waiting for workflow run $RUN_ID to complete..."
+          for attempt in $(seq 1 120); do
+            STATUS=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.status' 2>/dev/null || echo "unknown")
+            CONCLUSION=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.conclusion // empty' 2>/dev/null || true)
+            
+            echo "Attempt $attempt: status=$STATUS, conclusion=$CONCLUSION"
+            
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "✅ Target workflow completed successfully!"
+                exit 0
+              elif [ "$CONCLUSION" = "skipped" ]; then
+                echo "⏭️ Target workflow was skipped"
+                exit 0
+              else
+                echo "❌ Target workflow failed with conclusion: $CONCLUSION"
+                echo "See: https://github.com/$REPO/actions/runs/$RUN_ID"
+                exit 1
+              fi
+            fi
+            
+            sleep 15
+          done
+          
+          echo "::error::Timeout waiting for workflow to complete"
+          exit 1
