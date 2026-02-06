@@ -1279,7 +1279,7 @@ export async function* from<T>(
 **** Tests
 
 #+begin_src typescript :noweb-ref tests
-describe('fromSeq, () => {
+describe('fromSeq', () => {
   it('emits all values from an array', async () => {
     const values = await collect(from([1, 2, 3]))
     expect(values).toEqual([1, 2, 3])
@@ -13890,7 +13890,8 @@ Sequential (for await):       Concurrent (Promise.race):
   iter.next()                       ▼
       │                         Winner emits first
       ▼
-  ...waits for each             Re-queue winner, race again#+end_src
+  ...waits for each             Re-queue winner, race again
+#+end_src
 
 *** =raceIterators=
 
@@ -17214,7 +17215,10 @@ export function buffer<T>(
     let buf: T[] = []
     for await (const item of stream) {
       buf.push(item)
-      if (buf.length >= size) yield buf = []
+      if (buf.length >= size) {
+        yield buf
+        buf = []
+      }
     }
     if (buf.length > 0) yield buf
   })();
