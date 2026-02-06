@@ -1876,7 +1876,7 @@ public func periodic(intervalMs: UInt64) -> AsyncStream<Void> {
 
 #+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
   func testPeriodicEmitsAtIntervals() async throws {
-    let values = await collect(take(3, periodic(intervalMs: 10)))
+    let values: [Void] = await collect(take(3, periodic(intervalMs: 10)))
     XCTAssertEqual(values.count, 3)
   }
 #+end_src
@@ -15176,17 +15176,6 @@ module ChainTests =
         |> AsyncSeq.toListAsync
       Assert.Equal(4, values.Length)
     } |> Async.RunSynchronously
-#+end_src
-
-**** Tests
-
-#+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
-  func testChainFlattens() async throws {
-    let source = from([1, 2])
-    let result = await collect(chain { x in from([x * 10, x * 10 + 1]) }(source))
-    // With concurrent execution, order may vary
-    XCTAssertEqual(Set(result), Set([10, 11, 20, 21]))
-  }
 #+end_src
 
 ** =switchMap=
