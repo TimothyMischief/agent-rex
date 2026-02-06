@@ -63,9 +63,11 @@ jobs:
         with:
           node-version: '20'
 
-      # TODO: Replace with `npm install -g organjsm` once published
+      - name: Install organjsm
+        run: npm install -g organjsm
+
       - name: Tangle org file
-        run: node scripts/bootstrap-tangle.mjs index.org
+        run: npx organjsm tangle index.org
 
       - name: Upload tangled artifacts
         uses: actions/upload-artifact@v4

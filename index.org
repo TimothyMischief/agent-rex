@@ -23832,8 +23832,14 @@ jobs:
       - name: Pack
         run: dotnet pack --configuration Release --no-build --output nupkgs
 
+      - name: NuGet login (OIDC trusted publishing)
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: TimothyMischief
+
       - name: Publish to NuGet
-        run: dotnet nuget push nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 #+end_src
 
 *** F♯ (NuGet)
@@ -23872,8 +23878,14 @@ jobs:
       - name: Pack
         run: dotnet pack --configuration Release --no-build --output nupkgs
 
+      - name: NuGet login (OIDC trusted publishing)
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: TimothyMischief
+
       - name: Publish to NuGet
-        run: dotnet nuget push nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 #+end_src
 
 *** Python (PyPI)
