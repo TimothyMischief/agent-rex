@@ -15177,41 +15177,6 @@ module ChainTests =
     } |> Async.RunSynchronously
 #+end_src
 
-*** Swift Implementation
-
-#+begin_src swift :tangle swift/Sources/AgentRex/AgentRex.swift
-/// Maps each value to a stream and flattens the results concurrently.
-/// Also known as flatMap in some libraries.
-public func chain<T: Sendable, U: Sendable>(
-  _ fn: @Sendable @escaping (T) async -> AsyncStream<U>
-) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
-  return { stream in
-    AsyncStream { continuation in
-      Task {
-        await withTaskGroup(of: Void.self) { group in
-          for await item in stream {
-            let innerStream = await fn(item)
-            group.addTask {
-              for await innerItem in innerStream {
-                continuation.yield(innerItem)
-              }
-            }
-          }
-        }
-        continuation.finish()
-      }
-    }
-  }
-}
-
-/// Alias for chain.
-public func flatMap<T: Sendable, U: Sendable>(
-  _ fn: @Sendable @escaping (T) async -> AsyncStream<U>
-) -> @Sendable (AsyncStream<T>) -> AsyncStream<U> {
-  chain(fn)
-}
-#+end_src
-
 **** Tests
 
 #+begin_src swift :tangle swift/Tests/AgentRexTests/AgentRexTests.swift
@@ -16140,7 +16105,7 @@ module LatestTests =
 public func latest<T: Sendable, U: Sendable>(
   _ stream1: AsyncStream<T>,
   _ stream2: AsyncStream<U>
-) -> AsyncStream<(T, U)) {
+) -> AsyncStream<(T, U)> {
   AsyncStream { continuation in
     Task {
       let state = LatestState<T, U>()
