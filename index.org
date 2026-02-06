@@ -23387,13 +23387,10 @@ Each target repository needs its own publish workflow (defined below).
 
 | Repository  | Secret                  | Description                        |
 |-------------+-------------------------+------------------------------------|
-| TypeScript  | =NPM_TOKEN=             | npm automation token               |
-| Kotlin      | =MAVEN_GPG_PRIVATE_KEY= | GPG key for signing                |
-|             | =MAVEN_GPG_PASSPHRASE=  | GPG key passphrase                 |
-|             | =OSSRH_USERNAME=        | Sonatype OSSRH username            |
-|             | =OSSRH_TOKEN=           | Sonatype OSSRH token               |
-| C♯          | =NUGET_API_KEY=         | NuGet.org API key                  |
-| F♯          | =NUGET_API_KEY=         | NuGet.org API key                  |
+| TypeScript  | (none)                  | Uses npm trusted publishing (OIDC) |
+| Kotlin      | (none)                  | JitPack builds from tags           |
+| C♯          | (none)                  | Uses NuGet trusted publishing      |
+| F♯          | (none)                  | Uses NuGet trusted publishing      |
 | Python      | =PYPI_API_TOKEN=        | PyPI API token                     |
 | Rust        | =CARGO_REGISTRY_TOKEN=  | crates.io API token                |
 | Swift       | (none)                  | Auto-indexed from public GitHub    |
@@ -23808,6 +23805,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -23829,7 +23829,7 @@ jobs:
         run: dotnet pack --configuration Release --no-build --output nupkgs
 
       - name: Publish to NuGet
-        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
 #+end_src
 
 *** F♯ (NuGet)
@@ -23845,6 +23845,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -23866,7 +23869,7 @@ jobs:
         run: dotnet pack --configuration Release --no-build --output nupkgs
 
       - name: Publish to NuGet
-        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
 #+end_src
 
 *** Python (PyPI)
