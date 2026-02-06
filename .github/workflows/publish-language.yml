@@ -1,0 +1,109 @@
+name: Publish Language
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+      target_repo:
+        required: true
+        type: string
+      source_dir:
+        required: true
+        type: string
+    secrets:
+      TARGET_REPOS_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tangled artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tangled
+          path: tangled
+
+      - name: Clone target repository
+        run: |
+          git clone https://x-access-token:${{ secrets.TARGET_REPOS_TOKEN }}@github.com/${{ github.repository_owner }}/${{ inputs.target_repo }}.git target
+        
+      - name: Update target with tangled code
+        run: |
+          # Remove old source files (keep .git and workflows)
+          find target -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          
+          # Copy new tangled files
+          cp -r tangled/${{ inputs.source_dir }}/* target/
+
+      - name: Update version in package files
+        working-directory: target
+        run: |
+          VERSION="${{ inputs.version }}"
+          
+          case "${{ inputs.language }}" in
+            typescript)
+              if [ -f package.json ]; then
+                jq --arg v "$VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
+              fi
+              ;;
+            kotlin)
+              if [ -f build.gradle.kts ]; then
+                sed -i "s/version = \".*\"/version = \"$VERSION\"/" build.gradle.kts
+              fi
+              ;;
+            csharp|fsharp)
+              for csproj in *.csproj */*.csproj; do
+                if [ -f "$csproj" ]; then
+                  sed -i "s|<Version>.*</Version>|<Version>$VERSION</Version>|" "$csproj"
+                  # Add Version tag if it doesn't exist
+                  if ! grep -q "<Version>" "$csproj"; then
+                    sed -i "s|</PropertyGroup>|  <Version>$VERSION</Version>\n  </PropertyGroup>|" "$csproj"
+                  fi
+                fi
+              done
+              ;;
+            python)
+              if [ -f pyproject.toml ]; then
+                sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+              fi
+              ;;
+            rust)
+              if [ -f Cargo.toml ]; then
+                sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+              fi
+              ;;
+            swift)
+              # Swift packages use git tags for versioning
+              ;;
+          esac
+
+      - name: Commit and push
+        working-directory: target
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update to version ${{ inputs.version }}"
+            git push origin main
+          fi
+
+      - name: Create and push version tag
+        working-directory: target
+        run: |
+          TAG="v${{ inputs.version }}"
+          git tag -a "$TAG" -m "Release ${{ inputs.version }}"
+          git push origin "$TAG"

@@ -1,6 +1,16 @@
-# Ignore everything
+# Everything is ignored by default
 *
 
-# Except the org file (source of truth)
-!.gitignore
+# Except the literate source
 !index.org
+
+# And this gitignore
+!.gitignore
+
+# And the readme (tangled from org)
+!README.md
+
+# GitHub workflows need to be committed for CI to work
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml

@@ -23360,3 +23360,704 @@ class TestDrain:
     await drain(tracked())
     assert drained == [1, 2, 3]
 #+end_src
+
+* Publishing and CI/CD
+
+This section defines the continuous integration and publishing infrastructure for AgentRex.
+The architecture separates the literate source (this org file) from the published artifacts:
+
+- *Main Repository*: Contains only =index.org= and CI workflow files
+- *Target Repositories*: One per language, receives tangled code on each publish
+
+** Version Strategy
+
+Versions follow semantic versioning with three release channels:
+
+| Channel     | Tag Pattern         | Version Example           | Trigger              |
+|-------------+---------------------+---------------------------+----------------------|
+| Nightly     | (scheduled)         | =0.0.0-nightly.20260206=  | Daily at midnight    |
+| Pre-release | =v1.0.0-rc.1=       | =1.0.0-rc.1=              | Tag push with hyphen |
+| Release     | =v1.0.0=            | =1.0.0=                   | Tag push (no hyphen) |
+
+** Repository Setup
+
+*** Main Repository Structure
+
+The main repository should contain:
+
+#+begin_example
+agent-rex/
+├── index.org          # The literate source (committed)
+├── .github/
+│   └── workflows/
+│       └── publish.yml  # Tangled locally, gitignored
+└── .gitignore         # Ignores everything except index.org and itself
+#+end_example
+
+*** Target Repositories
+
+Create one repository per language. These receive tangled code from CI:
+
+| Language   | Repository Name         | Package Registry   |
+|------------+-------------------------+--------------------|
+| TypeScript | =agent-rex-typescript=  | npm                |
+| Kotlin     | =agent-rex-kotlin=      | Maven Central      |
+| C♯         | =agent-rex-csharp=      | NuGet              |
+| F♯         | =agent-rex-fsharp=      | NuGet              |
+| Python     | =agent-rex-python=      | PyPI               |
+| Rust       | =agent-rex-rust=        | crates.io          |
+| Swift      | =agent-rex-swift=       | Swift Package Index |
+
+Each target repository needs its own publish workflow (defined below).
+
+*** Required Secrets
+
+**** Main Repository
+
+| Secret                | Description                                      |
+|-----------------------+--------------------------------------------------|
+| =TARGET_REPOS_TOKEN=  | GitHub PAT with push access to all target repos |
+
+**** Target Repositories
+
+| Repository  | Secret                  | Description                        |
+|-------------+-------------------------+------------------------------------|
+| TypeScript  | =NPM_TOKEN=             | npm automation token               |
+| Kotlin      | =MAVEN_GPG_PRIVATE_KEY= | GPG key for signing                |
+|             | =MAVEN_GPG_PASSPHRASE=  | GPG key passphrase                 |
+|             | =OSSRH_USERNAME=        | Sonatype OSSRH username            |
+|             | =OSSRH_TOKEN=           | Sonatype OSSRH token               |
+| C♯          | =NUGET_API_KEY=         | NuGet.org API key                  |
+| F♯          | =NUGET_API_KEY=         | NuGet.org API key                  |
+| Python      | =PYPI_API_TOKEN=        | PyPI API token                     |
+| Rust        | =CARGO_REGISTRY_TOKEN=  | crates.io API token                |
+| Swift       | (none)                  | Auto-indexed from public GitHub    |
+
+** Main Repository Gitignore
+
+This gitignore ensures only the org file and essential config are committed:
+
+#+begin_src text :tangle .gitignore :comment no
+# Everything is ignored by default
+*
+
+# Except the literate source
+!index.org
+
+# And this gitignore
+!.gitignore
+
+# And the readme (tangled from org)
+!README.md
+
+# GitHub workflows need to be committed for CI to work
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+#+end_src
+
+** Main Publish Workflow
+
+This workflow runs in the main repository. It tangles the org file and pushes
+to target repositories with appropriate version tags.
+
+#+begin_src text :mkdirp yes :tangle .github/workflows/publish.yml :comments no
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    # Nightly at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Override version (e.g., 1.0.0-beta.1)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+    steps:
+      - name: Determine version and channel
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version_override }}" ]; then
+            VERSION="${{ github.event.inputs.version_override }}"
+            if [[ "$VERSION" == *"-"* ]]; then
+              CHANNEL="prerelease"
+            else
+              CHANNEL="release"
+            fi
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            VERSION="0.0.0-nightly.$(date +%Y%m%d)"
+            CHANNEL="nightly"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            if [[ "$VERSION" == *"-"* ]]; then
+              CHANNEL="prerelease"
+            else
+              CHANNEL="release"
+            fi
+          else
+            echo "Unknown trigger, defaulting to nightly"
+            VERSION="0.0.0-nightly.$(date +%Y%m%d)"
+            CHANNEL="nightly"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION ($CHANNEL)"
+
+  tangle:
+    runs-on: ubuntu-latest
+    needs: determine-version
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install organjsm
+        run: npm install -g organjsm
+
+      - name: Tangle org file
+        run: npx organjsm tangle index.org
+
+      - name: Upload tangled artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tangled
+          path: |
+            typescript/
+            kotlin/
+            csharp/
+            fsharp/
+            python/
+            rust/
+            swift/
+
+  publish-typescript:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: typescript
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-typescript
+      source_dir: typescript
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-kotlin:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: kotlin
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-kotlin
+      source_dir: kotlin
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-csharp:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: csharp
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-csharp
+      source_dir: csharp
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-fsharp:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: fsharp
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-fsharp
+      source_dir: fsharp
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-python:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: python
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-python
+      source_dir: python
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-rust:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: rust
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-rust
+      source_dir: rust
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-swift:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: swift
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-swift
+      source_dir: swift
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+#+end_src
+
+** Reusable Publish Language Workflow
+
+This reusable workflow handles pushing to a target repository:
+
+#+begin_src text :mkdirp yes :tangle .github/workflows/publish-language.yml :comments no
+name: Publish Language
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+      target_repo:
+        required: true
+        type: string
+      source_dir:
+        required: true
+        type: string
+    secrets:
+      TARGET_REPOS_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tangled artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tangled
+          path: tangled
+
+      - name: Clone target repository
+        run: |
+          git clone https://x-access-token:${{ secrets.TARGET_REPOS_TOKEN }}@github.com/${{ github.repository_owner }}/${{ inputs.target_repo }}.git target
+        
+      - name: Update target with tangled code
+        run: |
+          # Remove old source files (keep .git and workflows)
+          find target -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          
+          # Copy new tangled files
+          cp -r tangled/${{ inputs.source_dir }}/* target/
+
+      - name: Update version in package files
+        working-directory: target
+        run: |
+          VERSION="${{ inputs.version }}"
+          
+          case "${{ inputs.language }}" in
+            typescript)
+              if [ -f package.json ]; then
+                jq --arg v "$VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
+              fi
+              ;;
+            kotlin)
+              if [ -f build.gradle.kts ]; then
+                sed -i "s/version = \".*\"/version = \"$VERSION\"/" build.gradle.kts
+              fi
+              ;;
+            csharp|fsharp)
+              for csproj in *.csproj */*.csproj; do
+                if [ -f "$csproj" ]; then
+                  sed -i "s|<Version>.*</Version>|<Version>$VERSION</Version>|" "$csproj"
+                  # Add Version tag if it doesn't exist
+                  if ! grep -q "<Version>" "$csproj"; then
+                    sed -i "s|</PropertyGroup>|  <Version>$VERSION</Version>\n  </PropertyGroup>|" "$csproj"
+                  fi
+                fi
+              done
+              ;;
+            python)
+              if [ -f pyproject.toml ]; then
+                sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+              fi
+              ;;
+            rust)
+              if [ -f Cargo.toml ]; then
+                sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+              fi
+              ;;
+            swift)
+              # Swift packages use git tags for versioning
+              ;;
+          esac
+
+      - name: Commit and push
+        working-directory: target
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update to version ${{ inputs.version }}"
+            git push origin main
+          fi
+
+      - name: Create and push version tag
+        working-directory: target
+        run: |
+          TAG="v${{ inputs.version }}"
+          git tag -a "$TAG" -m "Release ${{ inputs.version }}"
+          git push origin "$TAG"
+#+end_src
+
+** Target Repository Workflows
+
+Each target repository needs a workflow that triggers on tag push and publishes to its registry.
+
+*** TypeScript (npm)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/typescript-publish.yml
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build --if-present
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+#+end_src
+
+*** Kotlin (Maven Central)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/kotlin-publish.yml
+name: Publish to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Publish to Maven Central
+        run: ./gradlew publishToMavenCentral --no-configuration-cache
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.OSSRH_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.OSSRH_TOKEN }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+#+end_src
+
+*** C♯ (NuGet)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/csharp-publish.yml
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build --output nupkgs
+
+      - name: Publish to NuGet
+        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+#+end_src
+
+*** F♯ (NuGet)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/fsharp-publish.yml
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build --output nupkgs
+
+      - name: Publish to NuGet
+        run: dotnet nuget push nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+#+end_src
+
+*** Python (PyPI)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/python-publish.yml
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pytest pytest-asyncio
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run tests
+        run: pytest
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+#+end_src
+
+*** Rust (crates.io)
+
+#+begin_src text :mkdirp yes :tangle target-workflows/rust-publish.yml
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+#+end_src
+
+*** Swift (Swift Package Index)
+
+Swift packages are automatically indexed by the Swift Package Index when they're
+public GitHub repositories with a valid =Package.swift=. No publish workflow needed,
+but we include a CI workflow for testing:
+
+#+begin_src text :mkdirp yes :tangle target-workflows/swift-ci.yml
+name: Swift CI
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build
+
+      - name: Run tests
+        run: swift test
+#+end_src
+
+** Local Development Setup
+
+To work with this repository locally:
+
+*** Initial Setup
+
+#+begin_src shell :tangle no
+# Clone the main repository
+git clone git@github.com:YOUR_ORG/agent-rex.git
+cd agent-rex
+
+# Install organjsm
+npm install -g organjsm
+
+# Tangle the org file (creates all source files locally)
+npx organjsm tangle index.org
+
+# The tangled files are gitignored, so git status shows clean
+#+end_src
+
+*** Creating a Release
+
+#+begin_src shell :tangle no
+# For a release version
+git tag v1.0.0
+git push origin v1.0.0
+
+# For a pre-release version  
+git tag v1.0.0-rc.1
+git push origin v1.0.0-rc.1
+
+# Nightly builds happen automatically at midnight UTC
+#+end_src
+
+*** Creating Target Repositories
+
+For each language, create a repository with:
+
+1. An initial README
+2. The appropriate publish workflow from =target-workflows/=
+3. Required secrets configured
+
+Example for TypeScript:
+
+#+begin_src shell :tangle no
+# Create repo on GitHub (agent-rex-typescript)
+gh repo create YOUR_ORG/agent-rex-typescript --public
+
+# Clone and add workflow
+git clone git@github.com:YOUR_ORG/agent-rex-typescript.git
+cd agent-rex-typescript
+mkdir -p .github/workflows
+cp ../agent-rex/target-workflows/typescript-publish.yml .github/workflows/publish.yml
+git add .github
+git commit -m "Add publish workflow"
+git push
+
+# Add secrets via GitHub UI or CLI
+gh secret set NPM_TOKEN --body "your-npm-token"
+#+end_src

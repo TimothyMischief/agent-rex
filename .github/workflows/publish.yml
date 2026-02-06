@@ -1,0 +1,167 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    # Nightly at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Override version (e.g., 1.0.0-beta.1)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+    steps:
+      - name: Determine version and channel
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version_override }}" ]; then
+            VERSION="${{ github.event.inputs.version_override }}"
+            if [[ "$VERSION" == *"-"* ]]; then
+              CHANNEL="prerelease"
+            else
+              CHANNEL="release"
+            fi
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            VERSION="0.0.0-nightly.$(date +%Y%m%d)"
+            CHANNEL="nightly"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            if [[ "$VERSION" == *"-"* ]]; then
+              CHANNEL="prerelease"
+            else
+              CHANNEL="release"
+            fi
+          else
+            echo "Unknown trigger, defaulting to nightly"
+            VERSION="0.0.0-nightly.$(date +%Y%m%d)"
+            CHANNEL="nightly"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION ($CHANNEL)"
+
+  tangle:
+    runs-on: ubuntu-latest
+    needs: determine-version
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install organjsm
+        run: npm install -g organjsm
+
+      - name: Tangle org file
+        run: npx organjsm tangle index.org
+
+      - name: Upload tangled artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tangled
+          path: |
+            typescript/
+            kotlin/
+            csharp/
+            fsharp/
+            python/
+            rust/
+            swift/
+
+  publish-typescript:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: typescript
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-typescript
+      source_dir: typescript
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-kotlin:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: kotlin
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-kotlin
+      source_dir: kotlin
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-csharp:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: csharp
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-csharp
+      source_dir: csharp
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-fsharp:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: fsharp
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-fsharp
+      source_dir: fsharp
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-python:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: python
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-python
+      source_dir: python
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-rust:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: rust
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-rust
+      source_dir: rust
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
+
+  publish-swift:
+    needs: [determine-version, tangle]
+    uses: ./.github/workflows/publish-language.yml
+    with:
+      language: swift
+      version: ${{ needs.determine-version.outputs.version }}
+      channel: ${{ needs.determine-version.outputs.channel }}
+      target_repo: agent-rex-swift
+      source_dir: swift
+    secrets:
+      TARGET_REPOS_TOKEN: ${{ secrets.TARGET_REPOS_TOKEN }}
