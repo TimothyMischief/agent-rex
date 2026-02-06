@@ -14,3 +14,7 @@
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
+
+# Bootstrap tangler (temporary until organjsm is published)
+!scripts/
+!scripts/bootstrap-tangle.mjs
