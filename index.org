@@ -23756,18 +23756,21 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 #+end_src
 
-*** Kotlin (Maven Central)
+*** Kotlin (JitPack)
 
 #+begin_src text :mkdirp yes :tangle target-workflows/kotlin-publish.yml
-name: Publish to Maven Central
+name: Build and Test
 
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23781,16 +23784,15 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run tests
-        run: ./gradlew test
+      - name: Build
+        run: gradle build
 
-      - name: Publish to Maven Central
-        run: ./gradlew publishToMavenCentral --no-configuration-cache
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.OSSRH_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.OSSRH_TOKEN }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+      - name: Run tests
+        run: gradle test
+
+# JitPack builds automatically from git tags
+# Users add: maven { url = "https://jitpack.io" }
+# Dependency: com.github.TimothyMischief:agent-rex-kotlin:TAG
 #+end_src
 
 *** C♯ (NuGet)
